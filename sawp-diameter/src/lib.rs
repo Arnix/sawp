@@ -146,44 +146,30 @@ impl Value {
                 let (data, raw_type) = be_u8(data)?;
 
                 match EapPayloadType::new(raw_type).code {
-                    EapPayloadTypeCode::Identity => {
-                        let id = String::from_utf8(data.to_vec()).unwrap_or(String::from("err"));
-                        let eap_payload = EapPayload {
-                            code: EapPayloadCode::new(raw_code),
-                            identifier,
-                            length,
-                            payload_type: EapPayloadType::new(raw_type),
-                            type_data: TypeData::Identity(id),
-                        };
-                        Ok((&[], (Value::Eap(eap_payload), ErrorFlags::NONE)))
-                    }
-                    EapPayloadTypeCode::Aka => {
-                        let (data, raw_sub_type) = be_u8(data)?;
-                        let (data, reserved) = be_u16(data)?;
-                        let sub_type = EapAkaSubType::new(raw_sub_type);
-
-                        let mut error_flags = ErrorFlags::NONE;
-                        let mut attributes = Vec::new();
-                        let (rest, attrs) = many0(combinator::complete(EapAkaAttribute::parse))(data)?;
-
-                        debug_assert_eq!(rest.len(), 0);
-                        for (attribute, flag) in attrs {
-                            error_flags |= flag;
-                            attributes.push(attribute)
+                    EapPayloadTypeCode::Identity => match String::from_utf8(data.to_vec()) {
+                        Ok(id) => {
+                            let eap_payload = EapPayload {
+                                code: EapPayloadCode::new(raw_code),
+                                identifier,
+                                length,
+                                payload_type: EapPayloadType::new(raw_type),
+                                type_data: TypeData::Identity(id),
+                            };
+                            Ok((&[], (Value::Eap(eap_payload), ErrorFlags::NONE)))
                         }
-                        let eap_payload = EapPayload {
-                            code: EapPayloadCode::new(raw_code),
-                            identifier,
-                            length,
-                            payload_type: EapPayloadType::new(raw_type),
-                            type_data: TypeData::EapAka(EapAkaTypeData{
-                                sub_type,
-                                reserved,
-                                attrs: attributes,
-                            }),
-                        };
-
-                        Ok((&[], (Value::Eap(eap_payload), error_flags)))
+                        Err(_) => {
+                            Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::DATA_VALUE)))
+                        }
+                    },
+                    EapPayloadTypeCode::Aka => {
+                        return match Self::handle_eap_aka(
+                            raw_code, identifier, length, raw_type, data,
+                        ) {
+                            Ok(eap_payload) => Ok(eap_payload),
+                            Err(_) => {
+                                Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::DATA_VALUE)))
+                            }
+                        }
                     }
                     EapPayloadTypeCode::Unknown => {
                         Ok((&[], (Value::OctetString(data.into()), ErrorFlags::NONE)))
@@ -288,6 +274,41 @@ impl Value {
             }
             _ => Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::NONE))),
         }
+    }
+
+    fn handle_eap_aka(
+        raw_code: u8,
+        identifier: u8,
+        length: u16,
+        raw_type: u8,
+        data: &[u8],
+    ) -> Result<(&[u8], (Value, ErrorFlags))> {
+        let (data, raw_sub_type) = be_u8(data)?;
+        let (data, reserved) = be_u16(data)?;
+        let sub_type = EapAkaSubType::new(raw_sub_type);
+
+        let mut error_flags = ErrorFlags::NONE;
+        let mut attributes = Vec::new();
+        let (rest, attrs) = many0(combinator::complete(EapAkaAttribute::parse))(data)?;
+
+        debug_assert_eq!(rest.len(), 0);
+        for (attribute, flag) in attrs {
+            error_flags |= flag;
+            attributes.push(attribute)
+        }
+        let eap_payload = EapPayload {
+            code: EapPayloadCode::new(raw_code),
+            identifier,
+            length,
+            payload_type: EapPayloadType::new(raw_type),
+            type_data: TypeData::EapAka(EapAkaTypeData {
+                sub_type,
+                reserved,
+                attrs: attributes,
+            }),
+        };
+
+        Ok((&[], (Value::Eap(eap_payload), error_flags)))
     }
 }
 
@@ -730,6 +751,27 @@ pub enum EapAkaAttributeValue {
     Unknown,
 }
 
+impl EapAkaAttributeValue {
+    pub fn len_val_vec(&self) -> Option<(&u16, &Vec<u8>)> {
+        match self {
+            EapAkaAttributeValue::AtAutnValue(len, val)
+            | EapAkaAttributeValue::AtResValue(len, val)
+            | EapAkaAttributeValue::AtMacValue(len, val)
+            | EapAkaAttributeValue::AtRandValue(len, val) => Some((len, val)),
+            EapAkaAttributeValue::NoValue
+            | EapAkaAttributeValue::Unknown
+            | EapAkaAttributeValue::AtIdentityValue(_, _) => None,
+        }
+    }
+
+    pub fn len_val_str(&self) -> Option<(&u16, &str)> {
+        match self {
+            EapAkaAttributeValue::AtIdentityValue(len, str) => Some((len, str)),
+            _ => None,
+        }
+    }
+}
+
 // https://datatracker.ietf.org/doc/html/rfc4187#page-48
 #[derive(Debug, PartialEq)]
 pub struct EapAkaAttribute {
@@ -1050,7 +1092,6 @@ mod tests {
         }
     }
 
-
     #[rstest(
     input,
     expected,
@@ -1127,9 +1168,6 @@ mod tests {
     fn decode_it(input: &[u8], expected: IResult<&[u8], (EapAkaAttribute, ErrorFlags)>) {
         assert_eq!(EapAkaAttribute::parse(input), expected);
     }
-
-
-
 
     #[test]
     fn decode_foo() {
@@ -1223,6 +1261,34 @@ mod tests {
         decode(input);
     }
 
+    #[test]
+    fn test_eap_r3() {
+        let input = &[
+            0x01, 0x00, 0x01, 0x20, 0xc0, 0x00, 0x01, 0x0c, 0x01, 0x00, 0x00, 0x30, 0x31, 0x6b,
+            0x38, 0xfa, 0x14, 0x00, 0x06, 0x6a, 0x00, 0x00, 0x01, 0x07, 0x40, 0x00, 0x00, 0x43,
+            0x30, 0x2e, 0x30, 0x2e, 0x30, 0x2e, 0x30, 0x3b, 0x33, 0x39, 0x33, 0x3b, 0x32, 0x39,
+            0x37, 0x36, 0x35, 0x39, 0x33, 0x37, 0x35, 0x36, 0x3b, 0x36, 0x63, 0x38, 0x32, 0x37,
+            0x34, 0x38, 0x32, 0x2d, 0x37, 0x32, 0x65, 0x30, 0x2d, 0x34, 0x31, 0x66, 0x39, 0x2d,
+            0x61, 0x33, 0x34, 0x61, 0x2d, 0x62, 0x39, 0x37, 0x35, 0x31, 0x36, 0x34, 0x32, 0x33,
+            0x65, 0x38, 0x64, 0x00, 0x00, 0x00, 0x01, 0x02, 0x40, 0x00, 0x00, 0x0c, 0x01, 0x00,
+            0x00, 0x30, 0x00, 0x00, 0x01, 0x1b, 0x40, 0x00, 0x00, 0x13, 0x74, 0x65, 0x6c, 0x65,
+            0x6e, 0x6f, 0x72, 0x2e, 0x67, 0x72, 0x78, 0x00, 0x00, 0x00, 0x01, 0x08, 0x40, 0x00,
+            0x00, 0x0f, 0x30, 0x2e, 0x30, 0x2e, 0x30, 0x2e, 0x30, 0x00, 0x00, 0x00, 0x01, 0x28,
+            0x40, 0x00, 0x00, 0x13, 0x74, 0x65, 0x6c, 0x65, 0x6e, 0x6f, 0x72, 0x2e, 0x67, 0x72,
+            0x78, 0x00, 0x00, 0x00, 0x01, 0x12, 0x40, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x03,
+            0x00, 0x00, 0x00, 0x01, 0x40, 0x00, 0x00, 0x3d, 0x30, 0x34, 0x31, 0x30, 0x30, 0x36,
+            0x30, 0x35, 0x35, 0x34, 0x36, 0x31, 0x33, 0x32, 0x35, 0x33, 0x40, 0x6e, 0x61, 0x69,
+            0x2e, 0x65, 0x70, 0x63, 0x2e, 0x6d, 0x6e, 0x63, 0x30, 0x36, 0x2e, 0x6d, 0x63, 0x63,
+            0x34, 0x31, 0x30, 0x2e, 0x33, 0x67, 0x70, 0x70, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72,
+            0x6b, 0x2e, 0x6f, 0x72, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xce, 0x40, 0x00,
+            0x00, 0x38, 0x02, 0x29, 0x00, 0x30, 0x17, 0x01, 0x00, 0x00, 0x03, 0x05, 0x00, 0x80,
+            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64,
+            0x65, 0x66, 0x0b, 0x05, 0x00, 0x00, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
+        ];
+        decode(input);
+    }
+
     fn decode(input: &[u8]) {
         let diameter = Diameter {};
         let msg = diameter.parse(input, Direction::Unknown);
@@ -1236,6 +1302,82 @@ mod tests {
                         println!("{:?}", message.header);
                         message.avps.iter().for_each(|avp| {
                             println!("{:?}", avp);
+                            match avp.attribute.code {
+                                AttributeCode::EapPayLoad => {
+                                    let v = &avp.value;
+                                    match v  {
+                                        Value::Unhandled(_) => {}
+                                        Value::OctetString(_) => {}
+                                        Value::Integer32(_) => {}
+                                        Value::Integer64(_) => {}
+                                        Value::Unsigned32(_) => {}
+                                        Value::Unsigned64(_) => {}
+                                        Value::Float32(_) => {}
+                                        Value::Float64(_) => {}
+                                        Value::Grouped(_) => {}
+                                        Value::Enumerated(_) => {}
+                                        Value::UTF8String(_) => {}
+                                        Value::DiameterIdentity(_) => {}
+                                        Value::DiameterURI(_) => {}
+                                        Value::Address(_) => {}
+                                        Value::Time(_) => {}
+                                        Value::Eap(eap_payload) => {
+                                            match  &eap_payload.type_data {
+                                                TypeData::Identity(_) => {}
+                                                TypeData::EapAka(eap_aka) => {
+                                                    match eap_aka.sub_type.code {
+                                                        EapAkaSubTypeCode::AkaChallenge => {
+                                                            eap_aka.attrs.iter().for_each(|attr| {
+                                                                match attr.attribute_type.code {
+                                                                    EapAkaAttributeTypeCode::AtRand => {}
+                                                                    EapAkaAttributeTypeCode::AtAutn => {}
+                                                                    EapAkaAttributeTypeCode::AtRes => {
+                                                                        let (len, val) = attr.value.len_val_vec().unwrap();
+                                                                        println!("len: {}, val: {:?}", len, val)
+                                                                    }
+                                                                    EapAkaAttributeTypeCode::AtAuts => {}
+                                                                    EapAkaAttributeTypeCode::AtPadding => {}
+                                                                    EapAkaAttributeTypeCode::AtNonceMt => {}
+                                                                    EapAkaAttributeTypeCode::AtPermanentIdReq => {}
+                                                                    EapAkaAttributeTypeCode::AtMac => {}
+                                                                    EapAkaAttributeTypeCode::AtNotification => {}
+                                                                    EapAkaAttributeTypeCode::AtAnyIdReq => {}
+                                                                    EapAkaAttributeTypeCode::AtIdentity => {}
+                                                                    EapAkaAttributeTypeCode::AtVersionList => {}
+                                                                    EapAkaAttributeTypeCode::AtSelectedVersion => {}
+                                                                    EapAkaAttributeTypeCode::AtFullAuthIdReq => {}
+                                                                    EapAkaAttributeTypeCode::AtCounter => {}
+                                                                    EapAkaAttributeTypeCode::AtCounterTooSmall => {}
+                                                                    EapAkaAttributeTypeCode::AtNonceS => {}
+                                                                    EapAkaAttributeTypeCode::AtClientErrorCode => {}
+                                                                    EapAkaAttributeTypeCode::AtIv => {}
+                                                                    EapAkaAttributeTypeCode::AtEncData => {}
+                                                                    EapAkaAttributeTypeCode::AtNextPseudonym => {}
+                                                                    EapAkaAttributeTypeCode::AtNextReauthId => {}
+                                                                    EapAkaAttributeTypeCode::AtCheckCode => {}
+                                                                    EapAkaAttributeTypeCode::AtResultInd => {}
+                                                                    EapAkaAttributeTypeCode::UnKnown => {}
+                                                                }
+
+                                                            })
+                                                        }
+                                                        EapAkaSubTypeCode::AkaAuthenticationReject => {}
+                                                        EapAkaSubTypeCode::AkaIdentity => {}
+                                                        EapAkaSubTypeCode::SimStart => {}
+                                                        EapAkaSubTypeCode::SimChallenge => {}
+                                                        EapAkaSubTypeCode::AkaNotificationAndSimNotification => {}
+                                                        EapAkaSubTypeCode::AkaReauthenticationAndSimReauthentication => {}
+                                                        EapAkaSubTypeCode::AkeClientErrorAndSimClientError => {}
+                                                        EapAkaSubTypeCode::UnKnown => {}
+                                                    }
+
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
                         });
                     }
                 }
