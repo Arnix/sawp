@@ -4,7 +4,10 @@
 //!     https://tools.ietf.org/html/rfc4187
 //!     https://tools.ietf.org/html/rfc3748
 
-use sawp::error::{NomError, Result};
+// #[macro_use]
+//extern crate num_derive;
+
+use sawp::error::{Error, NomError, Result};
 use sawp::parser::{Direction, Parse};
 use sawp::probe::Probe;
 use sawp::protocol::Protocol;
@@ -17,10 +20,16 @@ use nom::multi::many0;
 use nom::number::streaming::{be_u16, be_u24, be_u32, be_u64, be_u8};
 use nom::IResult;
 
+use bytestream::*;
+use std::io::*;
+
 use bitflags::bitflags;
+use byteorder::WriteBytesExt;
 use num_enum::TryFromPrimitive;
+use sawp::error::ErrorKind::InvalidData;
 use std::convert::TryFrom;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use EapAkaAttributeTypeCode::*;
 
 #[derive(Debug)]
 pub struct Diameter {}
@@ -169,7 +178,7 @@ impl Value {
                             Err(_) => {
                                 Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::DATA_VALUE)))
                             }
-                        }
+                        };
                     }
                     EapPayloadTypeCode::Unknown => {
                         Ok((&[], (Value::OctetString(data.into()), ErrorFlags::NONE)))
@@ -555,9 +564,9 @@ impl AVP {
                 value
             }
             Err(nom::Err::Error(NomError {
-                input: _,
-                code: ErrorKind::LengthValue,
-            }))
+                                    input: _,
+                                    code: ErrorKind::LengthValue,
+                                }))
             | Err(nom::Err::Incomplete(_)) => {
                 error_flags |= ErrorFlags::DATA_LENGTH;
                 Value::Unhandled(data.into())
@@ -735,32 +744,33 @@ impl EapAkaAttributeType {
     pub fn new(id: u8) -> Self {
         EapAkaAttributeType {
             raw: id,
-            code: EapAkaAttributeTypeCode::try_from(id).unwrap_or(EapAkaAttributeTypeCode::UnKnown),
+            code: EapAkaAttributeTypeCode::try_from(id).unwrap_or(UnKnown),
         }
     }
 }
 
+impl StreamWriter for EapAkaAttributeType {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.raw.write_to(buffer, order)?;
+        Ok(())
+    }
+}
+
+
 #[derive(Debug, PartialEq)]
 pub enum EapAkaAttributeValue {
     NoValue,
-    AtRandValue(u16, Vec<u8>),
-    AtAutnValue(u16, Vec<u8>),
-    AtResValue(u16, Vec<u8>),
-    AtMacValue(u16, Vec<u8>),
+    AtVecValue(u16, Vec<u8>),
     AtIdentityValue(u16, String),
+    U16(u16),
     Unknown,
 }
 
 impl EapAkaAttributeValue {
     pub fn len_val_vec(&self) -> Option<(&u16, &Vec<u8>)> {
         match self {
-            EapAkaAttributeValue::AtAutnValue(len, val)
-            | EapAkaAttributeValue::AtResValue(len, val)
-            | EapAkaAttributeValue::AtMacValue(len, val)
-            | EapAkaAttributeValue::AtRandValue(len, val) => Some((len, val)),
-            EapAkaAttributeValue::NoValue
-            | EapAkaAttributeValue::Unknown
-            | EapAkaAttributeValue::AtIdentityValue(_, _) => None,
+            EapAkaAttributeValue::AtVecValue(len, val) => Some((len, val)),
+            _ => None,
         }
     }
 
@@ -769,6 +779,32 @@ impl EapAkaAttributeValue {
             EapAkaAttributeValue::AtIdentityValue(len, str) => Some((len, str)),
             _ => None,
         }
+    }
+}
+
+impl StreamWriter for EapAkaAttributeValue {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        return match self {
+            EapAkaAttributeValue::AtVecValue(aux, data) => {
+                aux.write_to(buffer, order)?;
+                buffer.write_all(data.as_slice())?;
+                Ok(())
+            }
+            EapAkaAttributeValue::AtIdentityValue(aux, data) => {
+                aux.write_to(buffer, order)?;
+                buffer.write_all(data.as_bytes())?;
+                Ok(())
+            }
+            EapAkaAttributeValue::U16(attr) => {
+                attr.write_to(buffer, order)?;
+                Ok(())
+            }
+            EapAkaAttributeValue::NoValue => {
+                0u16.write_to(buffer, order)?;
+                Ok(())
+            }
+            EapAkaAttributeValue::Unknown => Ok(()),
+        };
     }
 }
 
@@ -783,20 +819,102 @@ pub struct EapAkaAttribute {
 }
 
 impl EapAkaAttribute {
+    fn new(
+        attribute_type_code: EapAkaAttributeTypeCode,
+        value: EapAkaAttributeValue,
+    ) -> Result<Self> {
+        match attribute_type_code {
+            AtRand | AtAutn | AtIv | AtPadding | AtMac | AtNonceS => match value {
+                EapAkaAttributeValue::AtVecValue(len, data) => {
+                    if data.len() == 16 {
+                        return Ok(EapAkaAttribute {
+                            attribute_type: EapAkaAttributeType::new(attribute_type_code as u8),
+                            length: 5,
+                            value: EapAkaAttributeValue::AtVecValue(len, data),
+                        });
+                    }
+                    Err(Error::incomplete_needed(16usize))
+                }
+                _ => Err(Error::from(InvalidData)),
+            },
+            AtRes | AtIdentity | AtNextPseudonym | AtNextReauthId => match value {
+                EapAkaAttributeValue::AtVecValue(len, mut data) => {
+                    sanitize_data_len(len, &data, &attribute_type_code)?;
+
+                    let desired_len = ((3 + data.len()) / 4) * 4;
+                    // extend buffer
+                    if desired_len != data.len() {
+                        data.resize(desired_len, 0);
+                    }
+                    return Ok(EapAkaAttribute {
+                        attribute_type: EapAkaAttributeType::new(attribute_type_code as u8),
+                        length: (4usize + data.len() / 4usize) as u8,
+                        value: EapAkaAttributeValue::AtVecValue(len, data),
+                    });
+                }
+                _ => Err(Error::from(InvalidData)),
+            },
+            AtAuts => match value {
+                EapAkaAttributeValue::AtVecValue(_len, data) => {
+                    sanitize_data_len(0, &data, &attribute_type_code)?;
+                    return Ok(EapAkaAttribute {
+                        attribute_type: EapAkaAttributeType::new(attribute_type_code as u8),
+                        length: 4,
+                        value: EapAkaAttributeValue::AtVecValue(14, data), // replace with value?
+                    });
+                }
+                _ => Err(Error::from(InvalidData)),
+            },
+            AtResultInd | AtCounterTooSmall | AtFullAuthIdReq | AtPermanentIdReq | AtAnyIdReq => {
+                match value {
+                    EapAkaAttributeValue::NoValue => {
+                        return Ok(EapAkaAttribute {
+                            attribute_type: EapAkaAttributeType::new(attribute_type_code as u8),
+                            length: 1,
+                            value,
+                        });
+                    }
+                    _ => Err(Error::from(InvalidData)),
+                }
+            }
+            AtCounter | AtClientErrorCode => match value {
+                EapAkaAttributeValue::U16(_val) => {
+                    return Ok(EapAkaAttribute {
+                        attribute_type: EapAkaAttributeType::new(attribute_type_code as u8),
+                        length: 1,
+                        value,
+                    });
+                }
+                _ => Err(Error::from(InvalidData)),
+            },
+            AtCheckCode => match value {
+                EapAkaAttributeValue::AtVecValue(_aux, data) => {
+                    sanitize_data_len(0, &data, &attribute_type_code)?;
+                    return Ok(EapAkaAttribute {
+                        attribute_type: EapAkaAttributeType::new(attribute_type_code as u8),
+                        length: 1 + (data.len() / 4) as u8,
+                        value: EapAkaAttributeValue::AtVecValue(0, data),
+                    });
+                }
+                _ => Err(Error::from(InvalidData)),
+            },
+            AtEncData | AtNonceMt | AtNotification | AtVersionList | AtSelectedVersion
+            | UnKnown => Err(Error::from(InvalidData)),
+        }
+    }
+
     fn parse(input: &[u8]) -> IResult<&[u8], (Self, ErrorFlags)> {
-        let (input, raw_eaat) = be_u8(input)?;
-        let attribute_type = EapAkaAttributeType::new(raw_eaat);
+        let (input, raw_eap_aka_att_type) = be_u8(input)?;
+        let attribute_type = EapAkaAttributeType::new(raw_eap_aka_att_type);
         let (input, length) = be_u8(input)?;
         let mut remaining: &[u8] = &[];
 
         let value: EapAkaAttributeValue = match attribute_type.code {
-            EapAkaAttributeTypeCode::AtPermanentIdReq
-            | EapAkaAttributeTypeCode::AtAnyIdReq
-            | EapAkaAttributeTypeCode::AtFullAuthIdReq => {
+            AtPermanentIdReq | AtAnyIdReq | AtFullAuthIdReq => {
                 assert_eq!(length, 1);
                 EapAkaAttributeValue::NoValue
             }
-            EapAkaAttributeTypeCode::AtIdentity => {
+            AtIdentity => {
                 let (input, actual_identity_length) = be_u16(input)?;
                 let (input, val) = take(actual_identity_length)(input)?;
                 remaining = input;
@@ -809,34 +927,16 @@ impl EapAkaAttribute {
                     }
                 }
             }
-            EapAkaAttributeTypeCode::AtRand => {
-                let (input, reserved) = be_u16(input)?;
-                let (input, val) = take(16usize)(input)?;
-                debug_assert_eq!(reserved, 0);
-                debug_assert_eq!(length, 5);
-                // debug_assert_eq!(input.len(), 0);
-                remaining = input;
-                EapAkaAttributeValue::AtRandValue(reserved, val.to_vec())
-            }
-            EapAkaAttributeTypeCode::AtAutn => {
+            AtRand | AtAutn | AtMac | AtIv | AtNonceS => {
                 let (input, reserved) = be_u16(input)?;
                 let (input, val) = take(16usize)(input)?;
                 // debug_assert_eq!(input.len(), 0);
                 debug_assert_eq!(reserved, 0);
                 debug_assert_eq!(length, 5);
                 remaining = input;
-                EapAkaAttributeValue::AtAutnValue(reserved, val.to_vec())
+                EapAkaAttributeValue::AtVecValue(reserved, val.to_vec())
             }
-            EapAkaAttributeTypeCode::AtMac => {
-                let (input, reserved) = be_u16(input)?;
-                let (input, val) = take(16usize)(input)?;
-                // debug_assert_eq!(input.len(), 0);
-                debug_assert_eq!(reserved, 0);
-                debug_assert_eq!(length, 5);
-                remaining = input;
-                EapAkaAttributeValue::AtMacValue(reserved, val.to_vec())
-            }
-            EapAkaAttributeTypeCode::AtRes => {
+            AtRes => {
                 let (input, res_length) = be_u16(input)?;
                 let content_len = ((length - 1) * 4) as usize;
                 let (input, val) = take(content_len)(input)?;
@@ -844,9 +944,11 @@ impl EapAkaAttribute {
                 debug_assert_eq!(content_len, (res_length / 8) as usize);
                 // debug_assert_eq!(input.len(), 0);
                 remaining = input;
-                EapAkaAttributeValue::AtResValue(res_length, val.to_vec())
+                EapAkaAttributeValue::AtVecValue(res_length, val.to_vec())
             }
-            _ => EapAkaAttributeValue::Unknown,
+            AtAuts | AtPadding | AtNonceMt | AtNotification | AtVersionList | AtSelectedVersion
+            | AtCounter | AtCounterTooSmall | AtClientErrorCode | AtEncData | AtNextPseudonym
+            | AtNextReauthId | AtCheckCode | AtResultInd | UnKnown => EapAkaAttributeValue::Unknown,
         };
         Ok((
             remaining,
@@ -862,6 +964,46 @@ impl EapAkaAttribute {
     }
 }
 
+impl StreamWriter for EapAkaAttribute {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.attribute_type.write_to(buffer, order)?;
+        self.length.write_to(buffer, order)?;
+        self.value.write_to(buffer, order)?;
+        Ok(())
+    }
+}
+
+fn sanitize_data_len(
+    aux: u16,
+    data: &Vec<u8>,
+    att_type_code: &EapAkaAttributeTypeCode,
+) -> Result<u8> {
+    match att_type_code {
+        AtRes => {
+            if (aux / 8) as usize <= data.len() {
+                return Ok(0);
+            }
+        }
+        AtIdentity | AtNextPseudonym | AtNextReauthId => {
+            if aux as usize == data.len() {
+                return Ok(0);
+            }
+        }
+        AtRand | AtAutn | AtIv | AtEncData | AtPadding | AtMac | AtNonceS => {
+            if aux == 0 && data.len() == 4 {
+                return Ok(0);
+            }
+        }
+        AtAuts => {
+            if data.len() == 14 {
+                return Ok(0);
+            }
+        }
+        _ => {}
+    }
+    Err(Error::from(InvalidData))
+}
+
 #[derive(Debug, PartialEq)]
 pub struct EapAkaTypeData {
     pub sub_type: EapAkaSubType,
@@ -872,7 +1014,7 @@ pub struct EapAkaTypeData {
 fn parse_avps(input: &[u8]) -> IResult<&[u8], (Vec<AVP>, ErrorFlags)> {
     let (rest, avps_flags) = many0(combinator::complete(AVP::parse))(input)?;
     if !rest.is_empty() {
-        // many0 will stop if subparser fails, but should read all
+        // many0 will stop if sub-parser fails, but should read all
         Err(nom::Err::Error(NomError::new(input, ErrorKind::Many0)))
     } else {
         let mut error_flags = ErrorFlags::NONE;
@@ -917,8 +1059,8 @@ impl<'a> Probe<'a> for Diameter {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytestream::ByteOrder::BigEndian;
     use rstest::rstest;
-    use sawp::error;
     use sawp::probe::Status;
 
     #[test]
@@ -1092,6 +1234,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_serialize() {
+        let input: &[u8] = &[
+            0x0b, 0x05, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+            0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        ];
+        let attr = EapAkaAttribute::parse(input).unwrap().1.0;
+        let mut buf = Vec::<u8>::new();
+        let res = attr.write_to(&mut buf, BigEndian);
+        println!("{:?}", buf);
+        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1.0;
+        println!("{:?}", attr);
+
+        let attr = EapAkaAttribute::new(
+            AtAnyIdReq,
+            EapAkaAttributeValue::NoValue,
+        ).unwrap();
+        let mut buf = Vec::<u8>::new();
+        let res = attr.write_to(&mut buf, BigEndian);
+        println!("{:?}", buf);
+        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1.0;
+        println!("{:?}", attr);
+    }
+
     #[rstest(
     input,
     expected,
@@ -1105,10 +1271,10 @@ mod tests {
     EapAkaAttribute {
     attribute_type: EapAkaAttributeType {
     raw: 1,
-    code: EapAkaAttributeTypeCode::AtRand,
+    code: AtRand,
     },
     length: 5,
-    value: EapAkaAttributeValue::AtRandValue(0x00, vec ! [0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x72, 0x61, 0x6e, 0x64, 0x6f, 0x6d, 0x2e, 0x2e, ]),
+    value: EapAkaAttributeValue::AtVecValue(0x00, vec ! [0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x72, 0x61, 0x6e, 0x64, 0x6f, 0x6d, 0x2e, 0x2e, ]),
     },
     ErrorFlags::NONE,
     )))
@@ -1122,10 +1288,10 @@ mod tests {
     EapAkaAttribute {
     attribute_type: EapAkaAttributeType {
     raw: 3,
-    code: EapAkaAttributeTypeCode::AtRes,
+    code: AtRes,
     },
     length: 5,
-    value: EapAkaAttributeValue::AtResValue(0x80, vec ! [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,]),
+    value: EapAkaAttributeValue::AtVecValue(0x80, vec ! [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,]),
     },
     ErrorFlags::NONE,
     )))
@@ -1139,10 +1305,10 @@ mod tests {
     EapAkaAttribute {
     attribute_type: EapAkaAttributeType {
     raw: 0xb,
-    code: EapAkaAttributeTypeCode::AtMac,
+    code: AtMac,
     },
     length: 0x5,
-    value: EapAkaAttributeValue::AtMacValue(0x00, vec ! [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, ]),
+    value: EapAkaAttributeValue::AtVecValue(0x00, vec ! [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, ]),
     },
     ErrorFlags::NONE,
     )))
@@ -1156,17 +1322,27 @@ mod tests {
     EapAkaAttribute {
     attribute_type: EapAkaAttributeType {
     raw: 0x02,
-    code: EapAkaAttributeTypeCode::AtAutn,
+    code: AtAutn,
     },
     length: 0x5,
-    value: EapAkaAttributeValue::AtAutnValue(0x00, vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10]),
+    value: EapAkaAttributeValue::AtVecValue(0x00, vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10]),
     },
     ErrorFlags::NONE,
     )))
     ),
     )]
     fn decode_it(input: &[u8], expected: IResult<&[u8], (EapAkaAttribute, ErrorFlags)>) {
-        assert_eq!(EapAkaAttribute::parse(input), expected);
+        let res = EapAkaAttribute::parse(input);
+        assert_eq!(res, expected);
+        match res {
+            Ok(attr) => {
+                let mut buf : Vec<u8> = vec![];
+                let attr = attr.1.0;
+                let res = attr.write_to(&mut buf, BigEndian);
+                assert_eq!(input, buf.as_slice());
+            }
+            Err(_) => {}
+        }
     }
 
     #[test]
@@ -1289,6 +1465,30 @@ mod tests {
         decode(input);
     }
 
+    #[test]
+    fn build_it() {
+        let attr = EapAkaAttribute::new(
+            AtAutn,
+            EapAkaAttributeValue::AtVecValue(16, b"0123456789abcdef".to_vec()),
+        );
+        println!("{:?}", attr);
+
+        let attr = EapAkaAttribute::new(
+            AtRes,
+            EapAkaAttributeValue::AtVecValue(
+                36,
+                vec![
+                    0b_1010_1010,
+                    0b_1010_1010,
+                    0b_1010_1010,
+                    0b_1010_1010,
+                    0b_1010_0000,
+                ],
+            ),
+        );
+        println!("{:?}", attr);
+    }
+
     fn decode(input: &[u8]) {
         let diameter = Diameter {};
         let msg = diameter.parse(input, Direction::Unknown);
@@ -1305,7 +1505,7 @@ mod tests {
                             match avp.attribute.code {
                                 AttributeCode::EapPayLoad => {
                                     let v = &avp.value;
-                                    match v  {
+                                    match v {
                                         Value::Unhandled(_) => {}
                                         Value::OctetString(_) => {}
                                         Value::Integer32(_) => {}
@@ -1322,43 +1522,42 @@ mod tests {
                                         Value::Address(_) => {}
                                         Value::Time(_) => {}
                                         Value::Eap(eap_payload) => {
-                                            match  &eap_payload.type_data {
+                                            match &eap_payload.type_data {
                                                 TypeData::Identity(_) => {}
                                                 TypeData::EapAka(eap_aka) => {
                                                     match eap_aka.sub_type.code {
                                                         EapAkaSubTypeCode::AkaChallenge => {
                                                             eap_aka.attrs.iter().for_each(|attr| {
                                                                 match attr.attribute_type.code {
-                                                                    EapAkaAttributeTypeCode::AtRand => {}
-                                                                    EapAkaAttributeTypeCode::AtAutn => {}
-                                                                    EapAkaAttributeTypeCode::AtRes => {
+                                                                    AtRand => {}
+                                                                    AtAutn => {}
+                                                                    AtRes => {
                                                                         let (len, val) = attr.value.len_val_vec().unwrap();
                                                                         println!("len: {}, val: {:?}", len, val)
                                                                     }
-                                                                    EapAkaAttributeTypeCode::AtAuts => {}
-                                                                    EapAkaAttributeTypeCode::AtPadding => {}
-                                                                    EapAkaAttributeTypeCode::AtNonceMt => {}
-                                                                    EapAkaAttributeTypeCode::AtPermanentIdReq => {}
-                                                                    EapAkaAttributeTypeCode::AtMac => {}
-                                                                    EapAkaAttributeTypeCode::AtNotification => {}
-                                                                    EapAkaAttributeTypeCode::AtAnyIdReq => {}
-                                                                    EapAkaAttributeTypeCode::AtIdentity => {}
-                                                                    EapAkaAttributeTypeCode::AtVersionList => {}
-                                                                    EapAkaAttributeTypeCode::AtSelectedVersion => {}
-                                                                    EapAkaAttributeTypeCode::AtFullAuthIdReq => {}
-                                                                    EapAkaAttributeTypeCode::AtCounter => {}
-                                                                    EapAkaAttributeTypeCode::AtCounterTooSmall => {}
-                                                                    EapAkaAttributeTypeCode::AtNonceS => {}
-                                                                    EapAkaAttributeTypeCode::AtClientErrorCode => {}
-                                                                    EapAkaAttributeTypeCode::AtIv => {}
-                                                                    EapAkaAttributeTypeCode::AtEncData => {}
-                                                                    EapAkaAttributeTypeCode::AtNextPseudonym => {}
-                                                                    EapAkaAttributeTypeCode::AtNextReauthId => {}
-                                                                    EapAkaAttributeTypeCode::AtCheckCode => {}
-                                                                    EapAkaAttributeTypeCode::AtResultInd => {}
-                                                                    EapAkaAttributeTypeCode::UnKnown => {}
+                                                                    AtAuts => {}
+                                                                    AtPadding => {}
+                                                                    AtNonceMt => {}
+                                                                    AtPermanentIdReq => {}
+                                                                    AtMac => {}
+                                                                    AtNotification => {}
+                                                                    AtAnyIdReq => {}
+                                                                    AtIdentity => {}
+                                                                    AtVersionList => {}
+                                                                    AtSelectedVersion => {}
+                                                                    AtFullAuthIdReq => {}
+                                                                    AtCounter => {}
+                                                                    AtCounterTooSmall => {}
+                                                                    AtNonceS => {}
+                                                                    AtClientErrorCode => {}
+                                                                    AtIv => {}
+                                                                    AtEncData => {}
+                                                                    AtNextPseudonym => {}
+                                                                    AtNextReauthId => {}
+                                                                    AtCheckCode => {}
+                                                                    AtResultInd => {}
+                                                                    UnKnown => {}
                                                                 }
-
                                                             })
                                                         }
                                                         EapAkaSubTypeCode::AkaAuthenticationReject => {}
@@ -1370,7 +1569,6 @@ mod tests {
                                                         EapAkaSubTypeCode::AkeClientErrorAndSimClientError => {}
                                                         EapAkaSubTypeCode::UnKnown => {}
                                                     }
-
                                                 }
                                             }
                                         }
@@ -1485,7 +1683,7 @@ mod tests {
     ),
     case::unsigned_64_format(
     & [
-    // Code: 287 (Accouting-Realtime-Required)
+    // Code: 287 (Accounting-Realtime-Required)
     0x00, 0x00, 0x01, 0x1f,
     // Flags: 0x00
     0x00,
@@ -1896,7 +2094,7 @@ mod tests {
     #[rstest(
     input,
     expected,
-    case::empty(b"", Err(error::Error::incomplete_needed(1))),
+    case::empty(b"", Err(Error::incomplete_needed(1))),
     case::header(
     & [
     // Version: 1
@@ -2056,7 +2254,7 @@ mod tests {
     // Data:
     // Padding:
     ],
-    Err(error::Error::incomplete_needed(2))
+    Err(Error::incomplete_needed(2))
     ),
     case::invalid_avp(
     & [
@@ -2102,7 +2300,7 @@ mod tests {
     // Data:
     // Padding:
     ],
-    Err(error::Error::parse(Some("Many0".to_string()))),
+    Err(Error::parse(Some("Many0".to_string()))),
     ),
     )]
     fn test_parse(input: &[u8], expected: Result<(&[u8], Option<Message>)>) {
