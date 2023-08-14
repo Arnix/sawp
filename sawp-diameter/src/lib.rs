@@ -24,7 +24,6 @@ use bytestream::*;
 use std::io::*;
 
 use bitflags::bitflags;
-use byteorder::WriteBytesExt;
 use num_enum::TryFromPrimitive;
 use sawp::error::ErrorKind::InvalidData;
 use std::convert::TryFrom;
@@ -45,6 +44,23 @@ pub struct Header {
     app_id: u32,
     hop_id: u32,
     end_id: u32,
+}
+
+impl StreamWriter for Header {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.version.write_to(buffer, order)?;
+        let bytes = &self.length.to_be_bytes()[1..4];
+        //self.length.write_to(buffer, order)?;
+        buffer.write_all(bytes)?;
+        self.flags.write_to(buffer, order)?;
+        // self.code.write_to(buffer, order)?;
+        let bytes = &self.code.to_be_bytes()[1..4];
+        buffer.write_all(bytes)?;
+        self.app_id.write_to(buffer, order)?;
+        self.hop_id.write_to(buffer, order)?;
+        self.end_id.write_to(buffer, order)?;
+        Ok(())
+    }
 }
 
 /// AVP Attribute Names as stated in the [protocol reference](https://tools.ietf.org/html/rfc6733#section-4.5)
@@ -120,6 +136,14 @@ impl Attribute {
         }
     }
 }
+
+impl StreamWriter for Attribute {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.raw.write_to(buffer, order)?;
+        Ok(())
+    }
+}
+
 
 /// AVP Data Format as specified in the [protocol reference](https://tools.ietf.org/html/rfc6733#section-4.2)
 #[derive(Debug, PartialEq)]
@@ -321,6 +345,77 @@ impl Value {
     }
 }
 
+impl StreamWriter for Value {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        match self {
+            Value::OctetString(data) | Value::Unhandled(data) => {
+                buffer.write_all(data.as_slice())?;
+            }
+            Value::Integer32(val) => {
+                val.write_to(buffer, order)?;
+            }
+            Value::Integer64(val) => {
+                val.write_to(buffer, order)?;
+            }
+            Value::Unsigned32( val) => {
+                val.write_to(buffer, order)?;
+            }
+            Value::Unsigned64(val) => {
+                val.write_to(buffer, order)?;
+            }
+            Value::Float32(val) => {
+                buffer.write_all(&val.to_be_bytes())?;
+            }
+            Value::Float64(val) => {
+                buffer.write_all(&val.to_be_bytes())?;
+            }
+            Value::Grouped(avps) => {
+                let res : Vec<std::io::Error> = avps.iter().map(|avp| {
+                    avp.write_to(buffer, order)
+                })
+                    .filter(|res| res.is_err())
+                    .map(|res| res.err().unwrap())
+                    .collect();
+                if let Some(err) = res.get(0) {
+                    let err = std::io::Error::new(err.kind(), err.to_string());
+                    return Err(err);
+                }
+            }
+            Value::Enumerated(val) => {
+                val.write_to(buffer, order)?;
+            }
+            Value::UTF8String(val) => {
+                buffer.write_all(val.as_bytes())?;
+            }
+            Value::DiameterIdentity(val) => {
+                buffer.write_all(val.as_bytes())?;
+            }
+            Value::DiameterURI(val) => {
+                buffer.write_all(val.as_bytes())?;
+            }
+            Value::Address(val) => {
+                match val {
+                    IpAddr::V4(addr) => {
+                        buffer.write_all(&addr.octets())?;
+                    }
+                    IpAddr::V6(addr) => {
+                        buffer.write_all(&addr.octets())?;
+                    }
+                }
+            }
+            Value::Time(val) => {
+                val.write_to(buffer, order)?;
+            }
+            Value::Eap(val) => {
+                val.write_to(buffer, order)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+
+
 #[derive(Debug, PartialEq)]
 pub struct AVP {
     attribute: Attribute,
@@ -469,6 +564,31 @@ impl Header {
     }
 }
 
+/*
+    pub header: Header,
+    pub avps: Vec<AVP>,
+    pub error_flags: ErrorFlags,
+
+ */
+impl StreamWriter for Message {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.header.write_to(buffer, order)?;
+        let res: Vec<_> = self
+            .avps
+            .iter()
+            .map(|avp| avp.write_to(buffer, order))
+            .filter(|res| res.is_err())
+            .map(|res| res.err().unwrap())
+            .collect();
+        if let Some(err) = res.get(0) {
+            let err = std::io::Error::new(err.kind(), err.to_string());
+            return Err(err);
+        }
+        // self.error_flags.bits.write_to(buffer, order)?;
+        Ok(())
+    }
+}
+
 impl AVP {
     // Number of bytes included in length that are before and
     // including the length field
@@ -564,9 +684,9 @@ impl AVP {
                 value
             }
             Err(nom::Err::Error(NomError {
-                                    input: _,
-                                    code: ErrorKind::LengthValue,
-                                }))
+                input: _,
+                code: ErrorKind::LengthValue,
+            }))
             | Err(nom::Err::Incomplete(_)) => {
                 error_flags |= ErrorFlags::DATA_LENGTH;
                 Value::Unhandled(data.into())
@@ -593,6 +713,24 @@ impl AVP {
         ))
     }
 }
+
+impl StreamWriter for AVP {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.attribute.write_to(buffer, order)?;
+        self.flags.write_to(buffer, order)?;
+        // self.length.write_to(buffer, order)?;
+        let bytes = &self.length.to_be_bytes()[1..4];
+        //self.length.write_to(buffer, order)?;
+        buffer.write_all(bytes)?;
+        if let Some(vendor_id) = self.vendor_id {
+            vendor_id.write_to(buffer, order)?;
+        }
+        self.value.write_to(buffer, order)?;
+        buffer.write_all(self.padding.as_slice())?;
+        Ok(())
+    }
+}
+
 
 impl std::fmt::Display for ErrorFlags {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -633,6 +771,13 @@ impl EapPayloadCode {
     }
 }
 
+impl StreamWriter for EapPayloadCode {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.raw.write_to(buffer, order)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, PartialEq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum EapPayloadTypeCode {
@@ -656,21 +801,53 @@ impl EapPayloadType {
     }
 }
 
+impl StreamWriter for EapPayloadType {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.raw.write_to(buffer, order)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum TypeData {
     Identity(String),
     EapAka(EapAkaTypeData),
 }
 
+impl StreamWriter for TypeData {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        match self {
+            TypeData::Identity(identity) => {
+                buffer.write_all(identity.as_bytes())?;
+            }
+            TypeData::EapAka(type_data) => {
+                type_data.write_to(buffer, order)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct EapPayload {
     pub code: EapPayloadCode,
     pub identifier: u8,
-    // must be same in request and (corresponding) requests
+    // must be same in request and (corresponding) response
     pub length: u16,
     // the entire payload, including type data
     pub payload_type: EapPayloadType,
     pub type_data: TypeData,
+}
+
+impl StreamWriter for EapPayload {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.code.write_to(buffer, order)?;
+        self.identifier.write_to(buffer, order)?;
+        self.length.write_to(buffer, order)?;
+        self.payload_type.write_to(buffer, order)?;
+        self.type_data.write_to(buffer, order)?;
+        Ok(())
+    }
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4187#section-11
@@ -700,6 +877,13 @@ impl EapAkaSubType {
             raw: id,
             code: EapAkaSubTypeCode::try_from(id).unwrap_or(EapAkaSubTypeCode::UnKnown),
         }
+    }
+}
+
+impl StreamWriter for EapAkaSubType {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.raw.write_to(buffer, order)?;
+        Ok(())
     }
 }
 
@@ -1011,6 +1195,30 @@ pub struct EapAkaTypeData {
     pub attrs: Vec<EapAkaAttribute>,
 }
 
+impl StreamWriter for EapAkaTypeData {
+    fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
+        self.sub_type.write_to(buffer, order)?;
+        self.reserved.write_to(buffer, order)?;
+        let res: Vec<_> = self
+            .attrs
+            .iter()
+            .map(|attr| attr.write_to(buffer, order))
+            .filter(|res| res.is_err())
+            .map(|res| res.err().unwrap())
+            .collect();
+
+        match res.len() {
+            0 => Ok(()),
+            _ => {
+                // this is coding until it compiles - figure out later how to do this
+                let first = res.get(0).unwrap();
+                let err = std::io::Error::new(first.kind(), first.to_string());
+                Err(err)
+            }
+        }
+    }
+}
+
 fn parse_avps(input: &[u8]) -> IResult<&[u8], (Vec<AVP>, ErrorFlags)> {
     let (rest, avps_flags) = many0(combinator::complete(AVP::parse))(input)?;
     if !rest.is_empty() {
@@ -1240,21 +1448,18 @@ mod tests {
             0x0b, 0x05, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
             0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
         ];
-        let attr = EapAkaAttribute::parse(input).unwrap().1.0;
+        let attr = EapAkaAttribute::parse(input).unwrap().1 .0;
         let mut buf = Vec::<u8>::new();
-        let res = attr.write_to(&mut buf, BigEndian);
+        let _res = attr.write_to(&mut buf, BigEndian);
         println!("{:?}", buf);
-        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1.0;
+        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1 .0;
         println!("{:?}", attr);
 
-        let attr = EapAkaAttribute::new(
-            AtAnyIdReq,
-            EapAkaAttributeValue::NoValue,
-        ).unwrap();
+        let attr = EapAkaAttribute::new(AtAnyIdReq, EapAkaAttributeValue::NoValue).unwrap();
         let mut buf = Vec::<u8>::new();
-        let res = attr.write_to(&mut buf, BigEndian);
+        let _res = attr.write_to(&mut buf, BigEndian);
         println!("{:?}", buf);
-        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1.0;
+        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1 .0;
         println!("{:?}", attr);
     }
 
@@ -1336,9 +1541,9 @@ mod tests {
         assert_eq!(res, expected);
         match res {
             Ok(attr) => {
-                let mut buf : Vec<u8> = vec![];
-                let attr = attr.1.0;
-                let res = attr.write_to(&mut buf, BigEndian);
+                let mut buf: Vec<u8> = vec![];
+                let attr = attr.1 .0;
+                let _res = attr.write_to(&mut buf, BigEndian);
                 assert_eq!(input, buf.as_slice());
             }
             Err(_) => {}
@@ -1650,7 +1855,7 @@ mod tests {
     ErrorFlags::NONE,
     )))
     ),
-    case::unsigned_32_format(
+    case::unsigned_32_format_ef(
     & [
     // Code: 266 (Vendor-Id)
     0x00, 0x00, 0x01, 0x0a,
@@ -1679,6 +1884,36 @@ mod tests {
     padding: vec ! [0x00, 0x00, 0x00],
     },
     ErrorFlags::DATA_LENGTH,
+    )))
+    ),
+    case::unsigned_32_format(
+    & [
+    // Code: 266 (Vendor-Id)
+    0x00, 0x00, 0x01, 0x0a,
+    // Flags: 0x00
+    0x00,
+    // Length: 12,
+    0x00, 0x00, 0x0c,
+    // Vendor-Id:
+    // Data:
+    0x00, 0x00, 0x00, 0x7b,
+    // Padding
+
+    ],
+    Ok((& [] as & [u8],
+    (
+    AVP {
+    attribute: Attribute {
+    raw: 266,
+    code: AttributeCode::VendorId,
+    },
+    flags: 0x00,
+    length: 12,
+    vendor_id: None,
+    value: Value::Unsigned32(123),
+    padding: vec ! [],
+    },
+    ErrorFlags::NONE,
     )))
     ),
     case::unsigned_64_format(
@@ -1920,7 +2155,7 @@ mod tests {
     ErrorFlags::NONE,
     )))
     ),
-    case::grouped_format(
+    case::grouped_format_ef(
     & [
     // Code: 297 (ExperimentalResult)
     0x00, 0x00, 0x01, 0x29,
@@ -1996,6 +2231,84 @@ mod tests {
     padding: Vec::new(),
     },
     ErrorFlags::NON_ZERO_PADDING | ErrorFlags::NON_ZERO_RESERVED
+    )))
+    ),
+    case::grouped_format(
+    & [
+    // Code: 297 (ExperimentalResult)
+    0x00, 0x00, 0x01, 0x29,
+    // Flags: 0x00
+    0x00,
+    // Length: 44,
+    0x00, 0x00, 0x2c,
+    // Vendor-Id:
+    // Data:
+
+    // AVPs[0]
+    // Code: 264 (OriginHost)
+    0x00, 0x00, 0x01, 0x08,
+    // Flags: 0x00
+    0x00,
+    // Length: 19,
+    0x00, 0x00, 0x13,
+    // Vendor-Id:
+    // Data: example.com
+    0x65, 0x78, 0x61, 0x6d,
+    0x70, 0x6c, 0x65, 0x2e,
+    0x63, 0x6f, 0x6d,
+    // Padding:
+    0x00,
+
+    // AVPs[1]
+    // Code: 44 ( AcctSessionId)
+    0x00, 0x00, 0x00, 0x2c,
+    // Flags: 0x00,
+    0x00,
+    // Length: 15,
+    0x00, 0x00, 0x0f,
+    // Vendor-Id:
+    // Data:
+    0x01, 0x02, 0x03, 0x04,
+    0x05, 0x06, 0x07,
+    // Padding:
+    0x00,
+    ],
+    Ok((& [] as & [u8],
+    (
+    AVP {
+    attribute: Attribute {
+    raw: 297,
+    code: AttributeCode::ExperimentalResult,
+    },
+    flags: 0x00,
+    length: 44,
+    vendor_id: None,
+    value: Value::Grouped(vec ! [
+    AVP {
+    attribute: Attribute {
+    raw: 264,
+    code: AttributeCode::OriginHost,
+    },
+    flags: 0x00,
+    length: 19,
+    vendor_id: None,
+    value: Value::DiameterIdentity("example.com".into()),
+    padding: vec ! [0x00],
+    },
+    AVP {
+    attribute: Attribute {
+    raw: 44,
+    code: AttributeCode::AcctSessionId,
+    },
+    flags: 0x00,
+    length: 15,
+    vendor_id: None,
+    value: Value::OctetString(vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]),
+    padding: vec ! [0x00],
+    }]),
+    padding: Vec::new(),
+    },
+    ErrorFlags::NONE
     )))
     ),
     case::invalid_utf8(
@@ -2088,7 +2401,18 @@ mod tests {
     )
     )]
     fn test_avp(input: &[u8], expected: IResult<&[u8], (AVP, ErrorFlags)>) {
-        assert_eq!(AVP::parse(input), expected);
+        let res = AVP::parse(input);
+        assert_eq!(res, expected);
+        match res {
+            Ok((_left, (avp, err_flag))) => {
+                if err_flag == ErrorFlags::NONE {
+                    let mut buf : Vec<u8> = Vec::new();
+                    let _res = avp.write_to(&mut buf, BigEndian);
+                    assert_eq!(buf.as_slice(), input);
+                }
+            }
+            Err(_) => {}
+        }
     }
 
     #[rstest(
@@ -2305,8 +2629,14 @@ mod tests {
     )]
     fn test_parse(input: &[u8], expected: Result<(&[u8], Option<Message>)>) {
         let diameter = Diameter {};
+        let res = diameter.parse(input, Direction::Unknown);
+        assert_eq!(res, expected);
 
-        assert_eq!(diameter.parse(input, Direction::Unknown), expected);
+        if let Ok((_rest, Some(message))) = res {
+            let mut buf : Vec<u8> = Vec::new();
+            let _res = message.write_to(&mut buf, BigEndian);
+            assert_eq!(buf.as_slice(), input);
+        }
     }
 
     #[rstest(
