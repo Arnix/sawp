@@ -11,6 +11,7 @@ use sawp::error::{Error, NomError, Result};
 use sawp::parser::{Direction, Parse};
 use sawp::probe::Probe;
 use sawp::protocol::Protocol;
+use std::any::Any;
 
 use nom::bytes::streaming::tag;
 use nom::bytes::streaming::take;
@@ -24,38 +25,113 @@ use bytestream::*;
 use std::io::*;
 
 use bitflags::bitflags;
-use num_enum::TryFromPrimitive;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use sawp::error::ErrorKind::InvalidData;
 use std::convert::TryFrom;
+use std::mem::size_of_val;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use EapAkaAttributeTypeCode::*;
 
 #[derive(Debug)]
 pub struct Diameter {}
 
+// Further candidates
+// | 316        3GPP-Update-Location-Request            ULR      3GPP TS 29.272 |
+// | 316        3GPP-Update-Location-Answer             ULA      3GPP TS 29.272 |
+// | 317        3GPP-Cancel-Location-Request            CLR      3GPP TS 29.272 |
+// | 317        3GPP-Cancel-Location-Answer             CLA      3GPP TS 29.272 |
+// | 318        3GPP-Authentication-Information-Request AIR      3GPP TS 29.272 |
+// | 318        3GPP-Authentication-Information-Answer  AIA      3GPP TS 29.272 |
+// | 319        3GPP-Insert-Subscriber-Data-Request     IDR      3GPP TS 29.272 |
+// | 319        3GPP-Insert-Subscriber-Data-Answer      IDA      3GPP TS 29.272 |
+// | 320        3GPP-Delete-Subscriber-Data-Request     DSR      3GPP TS 29.272 |
+// | 320        3GPP-Delete-Subscriber-Data-Answer      DSA      3GPP TS 29.272 |
+// | 321        3GPP-Purge-UE-Request                   PUR      3GPP TS 29.272 |
+// | 321        3GPP-Purge-UE-Answer                    PUA      3GPP TS 29.272 |
+// | 322        3GPP-Reset-Request                      RSR      3GPP TS 29.272 |
+// | 322        3GPP-Reset-Answer                       RSA      3GPP TS 29.272 |
+// | 323        3GPP-Notify-Request                     NOR      3GPP TS 29.272 |
+// | 323        3GPP-Notify-Answer                      NOA      3GPP TS 29.272 |
+// | 324        3GPP-ME-Identity-Check-Request          ECR      3GPP TS 29.272 |
+// | 324        3GPP-ME-Identity-Check-Answer           ECA      3GPP TS 29.272 |
+// | 8388622    3GPP-LCS-Routing-Info-Request           RIR      3GPP TS.29.173 |
+// | 8388622    3GPP-LCS-Routing-Info-Answer            RIA      3GPP TS.29.173 |
+
+#[derive(Debug, PartialEq, Clone, Copy, TryFromPrimitive, IntoPrimitive)]
+#[repr(u32)]
+pub enum CommandCode {
+    CapabilitiesExchange = 257,
+    ReAuth = 258,
+    AaMobileNode = 260,
+    HomeAgentMib = 262,
+    AA = 265,
+    DiameterEap = 268,
+    Accounting = 271,
+    AbortSession = 274,
+    SessionTermination = 275,
+    DeviceWatchdog = 280,
+    DisconnectPeer = 282,
+    UserAuthorization = 283,
+    ServerAssignment = 284,
+    LocationInfo = 285,
+    MediaAuth = 286,
+    RegistrationTermination = 287,
+    PushProfile = 288,
+    Unknown,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct Command {
+    raw: u32,
+    pub code: CommandCode,
+}
+
+impl Command {
+    pub fn new(val: u32) -> Self {
+        Command {
+            raw: val,
+            code: CommandCode::try_from(val).unwrap_or(CommandCode::Unknown),
+        }
+    }
+
+    pub fn new_from_cc(code: CommandCode) -> Self {
+        Command {
+            raw: code.into(),
+            code,
+        }
+    }
+}
+
+impl StreamWriter for Command {
+    fn write_to<W: Write>(&self, buffer: &mut W, _order: ByteOrder) -> std::io::Result<()> {
+        let bytes = &self.raw.to_be_bytes()[1..4];
+        buffer.write_all(bytes)?;
+        Ok(())
+    }
+}
+
+// 20 bytes fixed size
+// 8 + 24 + 8 + 24 + 32 + 32 + 32 bits
 #[derive(Debug, PartialEq)]
 pub struct Header {
-    version: u8,
-    length: u32,
-    // Actually u24
-    flags: u8,
-    code: u32,
-    // Actually u24
-    app_id: u32,
-    hop_id: u32,
-    end_id: u32,
+    pub version: u8,
+    // actually 24 bites on wire
+    pub length: u32,
+    pub flags: u8,
+    // actually 24 bits on wire
+    pub code: Command,
+    pub app_id: u32,
+    pub hop_id: u32,
+    pub end_id: u32,
 }
 
 impl StreamWriter for Header {
     fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
         self.version.write_to(buffer, order)?;
         let bytes = &self.length.to_be_bytes()[1..4];
-        //self.length.write_to(buffer, order)?;
         buffer.write_all(bytes)?;
         self.flags.write_to(buffer, order)?;
-        // self.code.write_to(buffer, order)?;
-        let bytes = &self.code.to_be_bytes()[1..4];
-        buffer.write_all(bytes)?;
+        self.code.write_to(buffer, order)?;
         self.app_id.write_to(buffer, order)?;
         self.hop_id.write_to(buffer, order)?;
         self.end_id.write_to(buffer, order)?;
@@ -64,7 +140,7 @@ impl StreamWriter for Header {
 }
 
 /// AVP Attribute Names as stated in the [protocol reference](https://tools.ietf.org/html/rfc6733#section-4.5)
-#[derive(Debug, PartialEq, TryFromPrimitive)]
+#[derive(Debug, PartialEq, Clone, TryFromPrimitive, IntoPrimitive)]
 #[repr(u32)]
 pub enum AttributeCode {
     Unknown = 0,
@@ -120,7 +196,7 @@ pub enum AttributeCode {
     VendorSpecificApplicationId = 260,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Attribute {
     /// Value of the code in AVP header
     raw: u32,
@@ -135,6 +211,10 @@ impl Attribute {
             code: AttributeCode::try_from(val).unwrap_or(AttributeCode::Unknown),
         }
     }
+
+    pub fn new_from_ac(attribute_code: AttributeCode) -> Self {
+        Attribute::new(attribute_code.into())
+    }
 }
 
 impl StreamWriter for Attribute {
@@ -144,9 +224,8 @@ impl StreamWriter for Attribute {
     }
 }
 
-
 /// AVP Data Format as specified in the [protocol reference](https://tools.ietf.org/html/rfc6733#section-4.2)
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Value {
     Unhandled(Vec<u8>),
     OctetString(Vec<u8>),
@@ -167,6 +246,32 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn len(&self) -> usize {
+        match self {
+            Value::Unhandled(data) | Value::OctetString(data) => data.len(),
+            Value::Integer32(val) => size_of_val(val),
+            Value::Integer64(val) => size_of_val(val),
+            Value::Unsigned32(val) => size_of_val(val),
+            Value::Unsigned64(val) => size_of_val(val),
+            Value::Float32(val) => size_of_val(val),
+            Value::Float64(val) => size_of_val(val),
+            Value::Grouped(avps) => avps
+                .iter()
+                .map(|avp| avp.length as usize + avp.padding.len())
+                .sum(),
+            Value::Enumerated(val) => size_of_val(val),
+            Value::UTF8String(string) => string.as_bytes().len(),
+            Value::DiameterIdentity(ident) => ident.as_bytes().len(),
+            Value::DiameterURI(uri) => uri.as_bytes().len(),
+            Value::Address(addr) => match addr {
+                IpAddr::V4(_) => 4usize,
+                IpAddr::V6(_) => 16usize,
+            },
+            Value::Time(time) => size_of_val(time),
+            Value::Eap(eap) => eap.length as usize,
+        }
+    }
+
     pub fn new<'a>(code: &AttributeCode, data: &'a [u8]) -> IResult<&'a [u8], (Self, ErrorFlags)> {
         match code {
             AttributeCode::AcctSessionId | AttributeCode::ProxyState => {
@@ -357,7 +462,7 @@ impl StreamWriter for Value {
             Value::Integer64(val) => {
                 val.write_to(buffer, order)?;
             }
-            Value::Unsigned32( val) => {
+            Value::Unsigned32(val) => {
                 val.write_to(buffer, order)?;
             }
             Value::Unsigned64(val) => {
@@ -370,9 +475,9 @@ impl StreamWriter for Value {
                 buffer.write_all(&val.to_be_bytes())?;
             }
             Value::Grouped(avps) => {
-                let res : Vec<std::io::Error> = avps.iter().map(|avp| {
-                    avp.write_to(buffer, order)
-                })
+                let res: Vec<std::io::Error> = avps
+                    .iter()
+                    .map(|avp| avp.write_to(buffer, order))
                     .filter(|res| res.is_err())
                     .map(|res| res.err().unwrap())
                     .collect();
@@ -393,16 +498,14 @@ impl StreamWriter for Value {
             Value::DiameterURI(val) => {
                 buffer.write_all(val.as_bytes())?;
             }
-            Value::Address(val) => {
-                match val {
-                    IpAddr::V4(addr) => {
-                        buffer.write_all(&addr.octets())?;
-                    }
-                    IpAddr::V6(addr) => {
-                        buffer.write_all(&addr.octets())?;
-                    }
+            Value::Address(val) => match val {
+                IpAddr::V4(addr) => {
+                    buffer.write_all(&addr.octets())?;
                 }
-            }
+                IpAddr::V6(addr) => {
+                    buffer.write_all(&addr.octets())?;
+                }
+            },
             Value::Time(val) => {
                 val.write_to(buffer, order)?;
             }
@@ -414,9 +517,7 @@ impl StreamWriter for Value {
     }
 }
 
-
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct AVP {
     attribute: Attribute,
     flags: u8,
@@ -553,7 +654,7 @@ impl Header {
                     version: version[0],
                     length,
                     flags,
-                    code,
+                    code: Command::new(code),
                     app_id,
                     hop_id,
                     end_id,
@@ -562,14 +663,33 @@ impl Header {
             ),
         ))
     }
+
+    pub fn response(&self, length: u32) -> Option<Self> {
+        if self.is_request() {
+            return Some(Header {
+                version: self.version,
+                length,
+                flags: self.flags ^ Header::REQUEST_FLAG,
+                code: self.code.to_owned(),
+                app_id: self.app_id,
+                hop_id: self.hop_id,
+                end_id: self.end_id,
+            });
+        }
+        None
+    }
+
+    pub fn command_code(&self) -> CommandCode {
+        self.code.code
+    }
 }
 
 /*
-    pub header: Header,
-    pub avps: Vec<AVP>,
-    pub error_flags: ErrorFlags,
+   pub header: Header,
+   pub avps: Vec<AVP>,
+   pub error_flags: ErrorFlags,
 
- */
+*/
 impl StreamWriter for Message {
     fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
         self.header.write_to(buffer, order)?;
@@ -588,6 +708,8 @@ impl StreamWriter for Message {
         Ok(())
     }
 }
+
+pub type TypeError = String;
 
 impl AVP {
     // Number of bytes included in length that are before and
@@ -712,6 +834,161 @@ impl AVP {
             ),
         ))
     }
+
+    fn len(vendor_id: Option<u32>, value: &Value) -> usize {
+        AVP::PRE_LENGTH_SIZE + value.len() + if vendor_id.is_some() { 4usize } else { 0 }
+    }
+
+    pub fn new(
+        attribute_code: AttributeCode,
+        vendor_id: Option<u32>,
+        flags: u8,
+        value: Value,
+    ) -> std::result::Result<Self, TypeError> {
+        let length = AVP::len(vendor_id, &value);
+
+        match attribute_code {
+            AttributeCode::Unknown => {}
+            AttributeCode::AcctInterimInterval
+            | AttributeCode::AcctApplicationId
+            | AttributeCode::AccountingRecordNumber
+            | AttributeCode::AuthApplicationId
+            | AttributeCode::AuthorizationLifetime
+            | AttributeCode::AuthGracePeriod
+            | AttributeCode::ExperimentalResultCode
+            | AttributeCode::FirmwareRevision
+            | AttributeCode::InbandSecurityId
+            | AttributeCode::MultiRoundTimeOut
+            | AttributeCode::OriginStateId
+            | AttributeCode::RedirectMaxCacheTime
+            | AttributeCode::ResultCode
+            | AttributeCode::SessionTimeout
+            | AttributeCode::SessionBinding
+            | AttributeCode::SupportedVendorId
+            | AttributeCode::VendorId => match value {
+                Value::Unsigned32(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'Unsigned32' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+            AttributeCode::AccountingRealtimeRequired
+            | AttributeCode::AccountingRecordType
+            | AttributeCode::AuthRequestType
+            | AttributeCode::AuthSessionState
+            | AttributeCode::ReAuthRequestType
+            | AttributeCode::DisconnectCause
+            | AttributeCode::RedirectHostUsage
+            | AttributeCode::SessionServerFailover
+            | AttributeCode::TerminationCause => match value {
+                Value::Unsigned32(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'Unsigned32' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+            AttributeCode::AcctMultiSessionId
+            | AttributeCode::Class
+            | AttributeCode::ErrorMessage
+            | AttributeCode::ProductName
+            | AttributeCode::SessionId
+            | AttributeCode::UserName => match value {
+                Value::UTF8String(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'UTF8String' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+            AttributeCode::AcctSessionId | AttributeCode::ProxyState => match value {
+                Value::OctetString(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'OctetString' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+            AttributeCode::AccountingSubSessionId => match value {
+                Value::Unsigned64(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'Unsigned64' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+            AttributeCode::DestinationHost
+            | AttributeCode::DestinationRealm
+            | AttributeCode::ErrorReportingHost
+            | AttributeCode::OriginHost
+            | AttributeCode::OriginRealm
+            | AttributeCode::ProxyHost
+            | AttributeCode::RouteRecord => match value {
+                Value::DiameterIdentity(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'DiameterIdentity' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+            AttributeCode::EapPayLoad => {}
+            AttributeCode::EventTimestamp => match value {
+                Value::Time(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'EapPayLoad' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+            AttributeCode::ExperimentalResult
+            | AttributeCode::FailedAVP
+            | AttributeCode::ProxyInfo
+            | AttributeCode::VendorSpecificApplicationId => match value {
+                Value::Grouped(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'Grouped' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+            AttributeCode::HostIPAddress => match value {
+                Value::Address(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'Address' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+            AttributeCode::RedirectHost => match value {
+                Value::DiameterURI(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'DiameterURL' expected for attribute {:?}",
+                        attribute_code
+                    ))
+                }
+            },
+        }
+
+        Ok(AVP {
+            attribute: Attribute::new_from_ac(attribute_code),
+            flags,
+            length: length as u32,
+            vendor_id,
+            value,
+            padding: vec![0; AVP::padding(length)],
+        })
+    }
 }
 
 impl StreamWriter for AVP {
@@ -731,6 +1008,22 @@ impl StreamWriter for AVP {
     }
 }
 
+impl Message {
+    pub fn response_to(message: &Message, avps: Vec<AVP>) -> Option<Self> {
+        let length: u32 = avps
+            .iter()
+            .map(|avp| avp.length + avp.padding.len() as u32)
+            .sum();
+        if let Some(response_header) = message.header.response(Header::SIZE as u32 + length) {
+            return Some(Message {
+                header: response_header,
+                avps,
+                error_flags: ErrorFlags::NONE,
+            });
+        }
+        None
+    }
+}
 
 impl std::fmt::Display for ErrorFlags {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -746,7 +1039,7 @@ impl Protocol<'_> for Diameter {
     }
 }
 
-#[derive(Debug, PartialEq, TryFromPrimitive)]
+#[derive(Debug, PartialEq, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum EapPayloadCodeCode {
     Request = 1,
@@ -756,7 +1049,7 @@ pub enum EapPayloadCodeCode {
     Unknown,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct EapPayloadCode {
     raw: u8,
     code: EapPayloadCodeCode,
@@ -778,7 +1071,7 @@ impl StreamWriter for EapPayloadCode {
     }
 }
 
-#[derive(Debug, PartialEq, TryFromPrimitive)]
+#[derive(Debug, PartialEq, Clone, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum EapPayloadTypeCode {
     Identity = 1,
@@ -786,7 +1079,7 @@ pub enum EapPayloadTypeCode {
     Unknown,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct EapPayloadType {
     raw: u8,
     code: EapPayloadTypeCode,
@@ -799,6 +1092,9 @@ impl EapPayloadType {
             code: EapPayloadTypeCode::try_from(id).unwrap_or(EapPayloadTypeCode::Unknown),
         }
     }
+    fn new_from_tc(tc: EapPayloadTypeCode) -> Self {
+        EapPayloadType::new(tc.into())
+    }
 }
 
 impl StreamWriter for EapPayloadType {
@@ -808,7 +1104,7 @@ impl StreamWriter for EapPayloadType {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum TypeData {
     Identity(String),
     EapAka(EapAkaTypeData),
@@ -828,7 +1124,7 @@ impl StreamWriter for TypeData {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct EapPayload {
     pub code: EapPayloadCode,
     pub identifier: u8,
@@ -851,7 +1147,7 @@ impl StreamWriter for EapPayload {
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4187#section-11
-#[derive(Debug, PartialEq, TryFromPrimitive)]
+#[derive(Debug, PartialEq, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum EapAkaSubTypeCode {
     AkaChallenge = 1,
@@ -865,7 +1161,7 @@ pub enum EapAkaSubTypeCode {
     UnKnown,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct EapAkaSubType {
     raw: u8,
     code: EapAkaSubTypeCode,
@@ -888,7 +1184,7 @@ impl StreamWriter for EapAkaSubType {
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4187#section-11
-#[derive(Debug, PartialEq, TryFromPrimitive)]
+#[derive(Debug, PartialEq, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum EapAkaAttributeTypeCode {
     AtRand = 1,
@@ -918,7 +1214,7 @@ pub enum EapAkaAttributeTypeCode {
     UnKnown,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct EapAkaAttributeType {
     pub raw: u8,
     pub code: EapAkaAttributeTypeCode,
@@ -940,8 +1236,7 @@ impl StreamWriter for EapAkaAttributeType {
     }
 }
 
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum EapAkaAttributeValue {
     NoValue,
     AtVecValue(u16, Vec<u8>),
@@ -993,7 +1288,7 @@ impl StreamWriter for EapAkaAttributeValue {
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4187#page-48
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct EapAkaAttribute {
     pub attribute_type: EapAkaAttributeType,
     pub length: u8,
@@ -1188,7 +1483,7 @@ fn sanitize_data_len(
     Err(Error::from(InvalidData))
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct EapAkaTypeData {
     pub sub_type: EapAkaSubType,
     pub reserved: u16,
@@ -1262,6 +1557,15 @@ impl<'a> Parse<'a> for Diameter {
     }
 }
 
+impl Diameter {
+    pub fn parse_ext<'a>(
+        &self,
+        input: &'a [u8],
+    ) -> Result<(&'a [u8], Option<<Diameter as Protocol>::Message>)> {
+        self.parse(input, Direction::Unknown)
+    }
+}
+
 impl<'a> Probe<'a> for Diameter {}
 
 #[cfg(test)]
@@ -1276,6 +1580,12 @@ mod tests {
         let e1 = EapPayloadType::new(1);
         assert_eq!(e1.code, EapPayloadTypeCode::Identity);
         println!("{:?}", e1);
+
+        let e1 = EapPayloadType::new(EapPayloadTypeCode::Identity.into());
+        assert_eq!(e1.code, EapPayloadTypeCode::Identity);
+
+        let e1 = EapPayloadType::new_from_tc(EapPayloadTypeCode::Identity);
+        assert_eq!(e1.code, EapPayloadTypeCode::Identity);
     }
 
     #[test]
@@ -1344,7 +1654,7 @@ mod tests {
     version: 1,
     length: 20,
     flags: 128,
-    code: 257,
+    code: Command::new(257),
     app_id: 0,
     hop_id: 0x53ca_fe6a,
     end_id: 0x7dc0_a11b,
@@ -1375,7 +1685,7 @@ mod tests {
     version: 1,
     length: 20,
     flags: 15,
-    code: 257,
+    code: Command::new(257),
     app_id: 0,
     hop_id: 0x53ca_fe6a,
     end_id: 0x7dc0_a11b,
@@ -1440,6 +1750,17 @@ mod tests {
                 assert!(true);
             }
         }
+    }
+
+    #[test]
+    fn test_avp_new() {
+        let avp = AVP::new(
+            AttributeCode::OriginRealm,
+            None,
+            0,
+            Value::DiameterIdentity(String::from("foo")),
+        );
+        println!("{:?}", avp.unwrap())
     }
 
     #[test]
@@ -1580,7 +1901,7 @@ mod tests {
                     version: 1,
                     length: 20,
                     flags: 15,
-                    code: 257,
+                    code: Command::new(257),
                     app_id: 0,
                     hop_id: 0x53ca_fe6a,
                     end_id: 0x7dc0_a11b,
@@ -2406,11 +2727,21 @@ mod tests {
         match res {
             Ok((_left, (avp, err_flag))) => {
                 if err_flag == ErrorFlags::NONE {
-                    let mut buf : Vec<u8> = Vec::new();
+                    let mut buf: Vec<u8> = Vec::new();
                     let _res = avp.write_to(&mut buf, BigEndian);
                     assert_eq!(buf.as_slice(), input);
+                    let len = AVP::len(avp.vendor_id, &avp.value);
+                    #[cfg(debug)]
+                    if len != avp.length {
+                        println!("Actual : {}, expected: {}", len, avp.length);
+                        let len = AVP::len(avp.vendor_id, &avp.value);
+                    } else {
+                        println!("Matched OK");
+                    }
+                    assert_eq!(len, avp.length as usize);
                 }
             }
+
             Err(_) => {}
         }
     }
@@ -2442,7 +2773,7 @@ mod tests {
     version: 1,
     length: 20,
     flags: 128,
-    code: 257,
+    code: Command::new(257),
     app_id: 0,
     hop_id: 0x53ca_fe6a,
     end_id: 0x7dc0_a11b,
@@ -2502,7 +2833,7 @@ mod tests {
     version: 1,
     length: 64,
     flags: 143,
-    code: 257,
+    code: Command::new(257),
     app_id: 0,
     hop_id: 0x53ca_fe6a,
     end_id: 0x7dc0_a11b,
@@ -2633,9 +2964,24 @@ mod tests {
         assert_eq!(res, expected);
 
         if let Ok((_rest, Some(message))) = res {
-            let mut buf : Vec<u8> = Vec::new();
+            let mut buf: Vec<u8> = Vec::new();
             let _res = message.write_to(&mut buf, BigEndian);
             assert_eq!(buf.as_slice(), input);
+            // clean this up, write separate tests
+            if message.header.is_request() {
+                let response = Message::response_to(
+                    &message,
+                    message.avps.iter().map(|m| m.clone()).collect(),
+                );
+                match response {
+                    None => {
+                        eprintln!("No response created");
+                    }
+                    Some(response) => {
+                        println!("Response: {:?}", response);
+                    }
+                }
+            }
         }
     }
 
