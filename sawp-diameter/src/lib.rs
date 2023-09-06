@@ -11,7 +11,6 @@ use sawp::error::{Error, NomError, Result};
 use sawp::parser::{Direction, Parse};
 use sawp::probe::Probe;
 use sawp::protocol::Protocol;
-use std::any::Any;
 
 use nom::bytes::streaming::tag;
 use nom::bytes::streaming::take;
@@ -34,6 +33,74 @@ use EapAkaAttributeTypeCode::*;
 
 #[derive(Debug)]
 pub struct Diameter {}
+
+#[allow(dead_code)]
+pub const DIAMETER_MULTI_ROUND_AUTH: u32 = 1001;
+#[allow(dead_code)]
+pub const DIAMETER_SUCCESS: u32 = 2001;
+#[allow(dead_code)]
+pub const DIAMETER_LIMITED_SUCCESS: u32 = 2002;
+#[allow(dead_code)]
+pub const DIAMETER_COMMAND_UNSUPPORTED: u32 = 3001;
+#[allow(dead_code)]
+pub const DIAMETER_UNABLE_TO_DELIVER: u32 = 3002;
+#[allow(dead_code)]
+pub const DIAMETER_REALM_NOT_SERVED: u32 = 3003;
+#[allow(dead_code)]
+pub const DIAMETER_TOO_BUSY: u32 = 3004;
+#[allow(dead_code)]
+pub const DIAMETER_LOOP_DETECTED: u32 = 3005;
+#[allow(dead_code)]
+pub const DIAMETER_REDIRECT_INDICATION: u32 = 3006;
+#[allow(dead_code)]
+pub const DIAMETER_APPLICATION_UNSUPPORTED: u32 = 3007;
+#[allow(dead_code)]
+pub const DIAMETER_INVALID_HDR_BITS: u32 = 3008;
+#[allow(dead_code)]
+pub const DIAMETER_INVALID_AVP_BITS: u32 = 3009;
+#[allow(dead_code)]
+pub const DIAMETER_UNKNOWN_PEER: u32 = 3010;
+#[allow(dead_code)]
+pub const DIAMETER_AUTHENTICATION_REJECTED: u32 = 4001;
+#[allow(dead_code)]
+pub const DIAMETER_OUT_OF_SPACE: u32 = 4002;
+#[allow(dead_code)]
+pub const DIAMETER_ELECTION_LOST: u32 = 4003;
+#[allow(dead_code)]
+pub const DIAMETER_AVP_UNSUPPORTED: u32 = 5001;
+#[allow(dead_code)]
+pub const DIAMETER_UNKNOWN_SESSION_ID: u32 = 5002;
+#[allow(dead_code)]
+pub const DIAMETER_AUTHORIZATION_REJECTED: u32 = 5003;
+#[allow(dead_code)]
+pub const DIAMETER_INVALID_AVP_VALUE: u32 = 5004;
+#[allow(dead_code)]
+pub const DIAMETER_MISSING_AVP: u32 = 5005;
+#[allow(dead_code)]
+pub const DIAMETER_RESOURCES_EXCEEDED: u32 = 5006;
+#[allow(dead_code)]
+pub const DIAMETER_CONTRADICTING_AVPS: u32 = 5007;
+#[allow(dead_code)]
+pub const DIAMETER_AVP_NOT_ALLOWED: u32 = 5008;
+#[allow(dead_code)]
+pub const DIAMETER_AVP_OCCURS_TOO_MANY_TIMES: u32 = 5009;
+#[allow(dead_code)]
+pub const DIAMETER_NO_COMMON_APPLICATION: u32 = 5010;
+#[allow(dead_code)]
+pub const DIAMETER_UNSUPPORTED_VERSION: u32 = 5011;
+#[allow(dead_code)]
+pub const DIAMETER_UNABLE_TO_COMPLY: u32 = 5012;
+#[allow(dead_code)]
+pub const DIAMETER_INVALID_BIT_IN_HEADER: u32 = 5013;
+#[allow(dead_code)]
+pub const DIAMETER_INVALID_AVP_LENGTH: u32 = 5014;
+#[allow(dead_code)]
+pub const DIAMETER_INVALID_MESSAGE_LENGTH: u32 = 5015;
+#[allow(dead_code)]
+pub const DIAMETER_INVALID_AVP_BIT_COMBO: u32 = 5016;
+#[allow(dead_code)]
+pub const DIAMETER_NO_COMMON_SECURITY: u32 = 5017;
+
 
 // Further candidates
 // | 316        3GPP-Update-Location-Request            ULR      3GPP TS 29.272 |
@@ -77,6 +144,16 @@ pub enum CommandCode {
     MediaAuth = 286,
     RegistrationTermination = 287,
     PushProfile = 288,
+    UpdateLocation = 316,
+    CancelLocation = 317,
+    AuthenticationInformation = 318,
+    InsertSubscriberData = 319,
+    DeleteSubscriberData = 320,
+    PurgeUE = 321,
+    Reset = 322,
+    Notify = 323,
+    MeIdentityCheck = 324,
+    LcsRoutingInfo = 8388622,
     Unknown,
 }
 
@@ -189,6 +266,9 @@ pub enum AttributeCode {
     SessionTimeout = 27,
     SessionBinding = 270,
     SessionServerFailover = 271,
+    SubscriptionId = 443,
+    SubscriptionIdData = 444,
+    SubscriptionIdType = 450,
     SupportedVendorId = 265,
     TerminationCause = 295,
     UserName = 1,
@@ -201,7 +281,7 @@ pub struct Attribute {
     /// Value of the code in AVP header
     raw: u32,
     /// Attribute name associated with raw value
-    code: AttributeCode,
+    pub code: AttributeCode,
 }
 
 impl Attribute {
@@ -243,6 +323,7 @@ pub enum Value {
     Address(IpAddr),
     Time(u32),
     Eap(EapPayload),
+    None,
 }
 
 impl Value {
@@ -269,6 +350,7 @@ impl Value {
             },
             Value::Time(time) => size_of_val(time),
             Value::Eap(eap) => eap.length as usize,
+            Value::None => { 0usize },
         }
     }
 
@@ -281,9 +363,25 @@ impl Value {
                 let (data, raw_code) = be_u8(data)?;
                 let (data, identifier) = be_u8(data)?;
                 let (data, length) = be_u16(data)?;
-                let (data, raw_type) = be_u8(data)?;
+                let (data, raw_type) = if length != 4 {
+                    be_u8(data)?
+                } else {
+                    // TODO: figure out how to do this
+                    let x : &[u8] = b"";
+                    (x, 0u8)
+                };
 
                 match EapPayloadType::new(raw_type).code {
+                    EapPayloadTypeCode::None => {
+                        let eap_payload = EapPayload {
+                            code : EapPayloadCode::new(raw_code),
+                            identifier,
+                            length,
+                            payload_type : EapPayloadType::new(raw_type),
+                            type_data : TypeData::None,
+                        };
+                        Ok((&[], (Value::Eap(eap_payload), ErrorFlags::NONE)))
+                    }
                     EapPayloadTypeCode::Identity => match String::from_utf8(data.to_vec()) {
                         Ok(id) => {
                             let eap_payload = EapPayload {
@@ -346,6 +444,7 @@ impl Value {
             | AttributeCode::DisconnectCause
             | AttributeCode::RedirectHostUsage
             | AttributeCode::SessionServerFailover
+            | AttributeCode::SubscriptionIdType
             | AttributeCode::TerminationCause => {
                 let (input, val) = be_u32(data)?;
                 Ok((input, (Value::Enumerated(val), ErrorFlags::NONE)))
@@ -353,6 +452,7 @@ impl Value {
             AttributeCode::ExperimentalResult
             | AttributeCode::FailedAVP
             | AttributeCode::ProxyInfo
+            | AttributeCode::SubscriptionId
             | AttributeCode::VendorSpecificApplicationId => {
                 let (input, (avps, error_flags)) = parse_avps(data)?;
                 Ok((input, (Value::Grouped(avps), error_flags)))
@@ -362,6 +462,7 @@ impl Value {
             | AttributeCode::ErrorMessage
             | AttributeCode::ProductName
             | AttributeCode::SessionId
+            | AttributeCode::SubscriptionIdData
             | AttributeCode::UserName => match String::from_utf8(data.to_vec()) {
                 Ok(string) => Ok((&[], (Value::UTF8String(string), ErrorFlags::NONE))),
                 Err(_) => Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::DATA_VALUE))),
@@ -505,13 +606,14 @@ impl StreamWriter for Value {
                 IpAddr::V6(addr) => {
                     buffer.write_all(&addr.octets())?;
                 }
-            },
+            }
             Value::Time(val) => {
                 val.write_to(buffer, order)?;
             }
             Value::Eap(val) => {
                 val.write_to(buffer, order)?;
-            }
+            },
+            Value::None => {}
         }
         Ok(())
     }
@@ -519,12 +621,12 @@ impl StreamWriter for Value {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct AVP {
-    attribute: Attribute,
-    flags: u8,
-    length: u32,
+    pub attribute: Attribute,
+    pub flags: u8,
+    pub length: u32,
     // Actually u24
-    vendor_id: Option<u32>,
-    value: Value,
+    pub vendor_id: Option<u32>,
+    pub value: Value,
     padding: Vec<u8>,
 }
 
@@ -664,19 +766,17 @@ impl Header {
         ))
     }
 
-    pub fn response(&self, length: u32) -> Option<Self> {
-        if self.is_request() {
-            return Some(Header {
-                version: self.version,
-                length,
-                flags: self.flags ^ Header::REQUEST_FLAG,
-                code: self.code.to_owned(),
-                app_id: self.app_id,
-                hop_id: self.hop_id,
-                end_id: self.end_id,
-            });
+    pub fn response(&self, length: u32) -> Self {
+        assert!(self.is_request());
+        Header {
+            version: self.version,
+            length,
+            flags: self.flags ^ Header::REQUEST_FLAG,
+            code: self.code.to_owned(),
+            app_id: self.app_id,
+            hop_id: self.hop_id,
+            end_id: self.end_id,
         }
-        None
     }
 
     pub fn command_code(&self) -> CommandCode {
@@ -806,9 +906,9 @@ impl AVP {
                 value
             }
             Err(nom::Err::Error(NomError {
-                input: _,
-                code: ErrorKind::LengthValue,
-            }))
+                                    input: _,
+                                    code: ErrorKind::LengthValue,
+                                }))
             | Err(nom::Err::Incomplete(_)) => {
                 error_flags |= ErrorFlags::DATA_LENGTH;
                 Value::Unhandled(data.into())
@@ -871,24 +971,7 @@ impl AVP {
                     return Err(format!(
                         "Value type 'Unsigned32' expected for attribute {:?}",
                         attribute_code
-                    ))
-                }
-            },
-            AttributeCode::AccountingRealtimeRequired
-            | AttributeCode::AccountingRecordType
-            | AttributeCode::AuthRequestType
-            | AttributeCode::AuthSessionState
-            | AttributeCode::ReAuthRequestType
-            | AttributeCode::DisconnectCause
-            | AttributeCode::RedirectHostUsage
-            | AttributeCode::SessionServerFailover
-            | AttributeCode::TerminationCause => match value {
-                Value::Unsigned32(_) => {}
-                _ => {
-                    return Err(format!(
-                        "Value type 'Unsigned32' expected for attribute {:?}",
-                        attribute_code
-                    ))
+                    ));
                 }
             },
             AttributeCode::AcctMultiSessionId
@@ -896,13 +979,14 @@ impl AVP {
             | AttributeCode::ErrorMessage
             | AttributeCode::ProductName
             | AttributeCode::SessionId
+            | AttributeCode::SubscriptionIdData
             | AttributeCode::UserName => match value {
                 Value::UTF8String(_) => {}
                 _ => {
                     return Err(format!(
                         "Value type 'UTF8String' expected for attribute {:?}",
                         attribute_code
-                    ))
+                    ));
                 }
             },
             AttributeCode::AcctSessionId | AttributeCode::ProxyState => match value {
@@ -911,7 +995,7 @@ impl AVP {
                     return Err(format!(
                         "Value type 'OctetString' expected for attribute {:?}",
                         attribute_code
-                    ))
+                    ));
                 }
             },
             AttributeCode::AccountingSubSessionId => match value {
@@ -920,7 +1004,7 @@ impl AVP {
                     return Err(format!(
                         "Value type 'Unsigned64' expected for attribute {:?}",
                         attribute_code
-                    ))
+                    ));
                 }
             },
             AttributeCode::DestinationHost
@@ -935,7 +1019,7 @@ impl AVP {
                     return Err(format!(
                         "Value type 'DiameterIdentity' expected for attribute {:?}",
                         attribute_code
-                    ))
+                    ));
                 }
             },
             AttributeCode::EapPayLoad => {}
@@ -945,19 +1029,20 @@ impl AVP {
                     return Err(format!(
                         "Value type 'EapPayLoad' expected for attribute {:?}",
                         attribute_code
-                    ))
+                    ));
                 }
             },
             AttributeCode::ExperimentalResult
             | AttributeCode::FailedAVP
             | AttributeCode::ProxyInfo
+            | AttributeCode::SubscriptionId
             | AttributeCode::VendorSpecificApplicationId => match value {
                 Value::Grouped(_) => {}
                 _ => {
                     return Err(format!(
                         "Value type 'Grouped' expected for attribute {:?}",
                         attribute_code
-                    ))
+                    ));
                 }
             },
             AttributeCode::HostIPAddress => match value {
@@ -966,7 +1051,7 @@ impl AVP {
                     return Err(format!(
                         "Value type 'Address' expected for attribute {:?}",
                         attribute_code
-                    ))
+                    ));
                 }
             },
             AttributeCode::RedirectHost => match value {
@@ -975,9 +1060,27 @@ impl AVP {
                     return Err(format!(
                         "Value type 'DiameterURL' expected for attribute {:?}",
                         attribute_code
-                    ))
+                    ));
                 }
             },
+            AttributeCode::AccountingRealtimeRequired
+            | AttributeCode::AccountingRecordType
+            | AttributeCode::AuthRequestType
+            | AttributeCode::AuthSessionState
+            | AttributeCode::ReAuthRequestType
+            | AttributeCode::DisconnectCause
+            | AttributeCode::RedirectHostUsage
+            | AttributeCode::SessionServerFailover
+            | AttributeCode::SubscriptionIdType
+            | AttributeCode::TerminationCause => match value {
+                Value::Enumerated(_) => {}
+                _ => {
+                    return Err(format!(
+                        "Value type 'Enumerated' expected for attribute {:?}",
+                        attribute_code
+                    ));
+                }
+            }
         }
 
         Ok(AVP {
@@ -995,9 +1098,7 @@ impl StreamWriter for AVP {
     fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
         self.attribute.write_to(buffer, order)?;
         self.flags.write_to(buffer, order)?;
-        // self.length.write_to(buffer, order)?;
         let bytes = &self.length.to_be_bytes()[1..4];
-        //self.length.write_to(buffer, order)?;
         buffer.write_all(bytes)?;
         if let Some(vendor_id) = self.vendor_id {
             vendor_id.write_to(buffer, order)?;
@@ -1009,19 +1110,51 @@ impl StreamWriter for AVP {
 }
 
 impl Message {
-    pub fn response_to(message: &Message, avps: Vec<AVP>) -> Option<Self> {
-        let length: u32 = avps
+    pub fn response_to(message: &Message, avps: Vec<AVP>) -> std::result::Result<Message, TypeError> {
+        if !message.header.is_request() {
+            return Err(TypeError::from("Cannot make response for response"));
+        }
+
+        let mut all_avps = Vec::<AVP>::new();
+        Message::copy_basic_avps2(message, &mut all_avps, false);
+        all_avps.extend(avps);
+
+        let length: u32 = all_avps
             .iter()
             .map(|avp| avp.length + avp.padding.len() as u32)
             .sum();
-        if let Some(response_header) = message.header.response(Header::SIZE as u32 + length) {
-            return Some(Message {
-                header: response_header,
-                avps,
-                error_flags: ErrorFlags::NONE,
-            });
-        }
-        None
+        Ok(Message {
+            header: message.header.response(Header::SIZE as u32 + length),
+            avps: all_avps,
+            error_flags: ErrorFlags::NONE,
+        })
+    }
+
+    pub fn avp_by_code(&self, code: AttributeCode) -> Option<&AVP> {
+        self.avps.iter().filter(|avp| { avp.attribute.code == code }).collect::<Vec<&AVP>>().get(0).copied()
+    }
+
+    #[allow(dead_code)]
+    pub fn copy_basic_avps<'a>(src_message: &'a Message, avps: &mut Vec::<&'a AVP>, _invert_points: bool) {
+        src_message.avp_by_code(AttributeCode::SessionId).map(|avp| avps.push(avp.into()));
+        src_message.avp_by_code(AttributeCode::AcctSessionId).map(|avp| avps.push(avp));
+        src_message.avp_by_code(AttributeCode::AccountingSubSessionId).map(|avp| avps.push(avp));
+        src_message.avp_by_code(AttributeCode::AcctMultiSessionId).map(|avp| avps.push(avp));
+        src_message.avp_by_code(AttributeCode::VendorSpecificApplicationId).map(|avp| avps.push(avp));
+        src_message.avp_by_code(AttributeCode::AcctApplicationId).map(|avp| avps.push(avp));
+        src_message.avp_by_code(AttributeCode::AuthApplicationId).map(|avp| avps.push(avp));
+        src_message.avp_by_code(AttributeCode::ProxyInfo).map(|avp| avps.push(avp));
+    }
+
+    pub fn copy_basic_avps2(src_message: &Message, avps: &mut Vec::<AVP>, _invert_points: bool) {
+        src_message.avp_by_code(AttributeCode::SessionId).map(|avp| avps.push(avp.clone()));
+        src_message.avp_by_code(AttributeCode::AcctSessionId).map(|avp| avps.push(avp.clone()));
+        src_message.avp_by_code(AttributeCode::AccountingSubSessionId).map(|avp| avps.push(avp.clone()));
+        src_message.avp_by_code(AttributeCode::AcctMultiSessionId).map(|avp| avps.push(avp.clone()));
+        src_message.avp_by_code(AttributeCode::VendorSpecificApplicationId).map(|avp| avps.push(avp.clone()));
+        src_message.avp_by_code(AttributeCode::AcctApplicationId).map(|avp| avps.push(avp.clone()));
+        src_message.avp_by_code(AttributeCode::AuthApplicationId).map(|avp| avps.push(avp.clone()));
+        src_message.avp_by_code(AttributeCode::ProxyInfo).map(|avp| avps.push(avp.clone()));
     }
 }
 
@@ -1039,7 +1172,7 @@ impl Protocol<'_> for Diameter {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, TryFromPrimitive)]
+#[derive(Debug, PartialEq, Clone, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum EapPayloadCodeCode {
     Request = 1,
@@ -1062,6 +1195,10 @@ impl EapPayloadCode {
             code: EapPayloadCodeCode::try_from(id).unwrap_or(EapPayloadCodeCode::Unknown),
         }
     }
+
+    pub fn new_from_plc(plc: EapPayloadCodeCode) -> Self {
+        EapPayloadCode::new(plc.into())
+    }
 }
 
 impl StreamWriter for EapPayloadCode {
@@ -1074,6 +1211,7 @@ impl StreamWriter for EapPayloadCode {
 #[derive(Debug, PartialEq, Clone, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum EapPayloadTypeCode {
+    None = 0,
     Identity = 1,
     Aka = 23,
     Unknown,
@@ -1082,7 +1220,7 @@ pub enum EapPayloadTypeCode {
 #[derive(Debug, PartialEq, Clone)]
 pub struct EapPayloadType {
     raw: u8,
-    code: EapPayloadTypeCode,
+    pub code: EapPayloadTypeCode,
 }
 
 impl EapPayloadType {
@@ -1092,14 +1230,17 @@ impl EapPayloadType {
             code: EapPayloadTypeCode::try_from(id).unwrap_or(EapPayloadTypeCode::Unknown),
         }
     }
-    fn new_from_tc(tc: EapPayloadTypeCode) -> Self {
+    #[allow(dead_code)]
+    pub fn new_from_tc(tc: EapPayloadTypeCode) -> Self {
         EapPayloadType::new(tc.into())
     }
 }
 
 impl StreamWriter for EapPayloadType {
     fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
-        self.raw.write_to(buffer, order)?;
+        if self.code != EapPayloadTypeCode::None {
+            self.raw.write_to(buffer, order)?;
+        }
         Ok(())
     }
 }
@@ -1108,6 +1249,7 @@ impl StreamWriter for EapPayloadType {
 pub enum TypeData {
     Identity(String),
     EapAka(EapAkaTypeData),
+    None
 }
 
 impl StreamWriter for TypeData {
@@ -1119,6 +1261,7 @@ impl StreamWriter for TypeData {
             TypeData::EapAka(type_data) => {
                 type_data.write_to(buffer, order)?;
             }
+            TypeData::None => {}
         }
         Ok(())
     }
@@ -1135,6 +1278,29 @@ pub struct EapPayload {
     pub type_data: TypeData,
 }
 
+impl EapPayload {
+    pub fn new(code: EapPayloadCode, identifier: u8, payload_type: EapPayloadType, type_data: TypeData) -> Self {
+        let len = match &type_data {
+            TypeData::Identity(identity) => {
+                identity.len()
+            }
+            TypeData::EapAka(data) => {
+                (data.attrs.iter().map(|attr| attr.length * 4).sum::<u8>() + 8u8).into()
+            }
+            TypeData::None => {
+                4usize
+            }
+        };
+        EapPayload {
+            code,
+            identifier,
+            length: len as u16,
+            payload_type,
+            type_data,
+        }
+    }
+}
+
 impl StreamWriter for EapPayload {
     fn write_to<W: Write>(&self, buffer: &mut W, order: ByteOrder) -> std::io::Result<()> {
         self.code.write_to(buffer, order)?;
@@ -1147,11 +1313,12 @@ impl StreamWriter for EapPayload {
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4187#section-11
-#[derive(Debug, PartialEq, Clone, TryFromPrimitive)]
+#[derive(Debug, PartialEq, Clone, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum EapAkaSubTypeCode {
     AkaChallenge = 1,
     AkaAuthenticationReject = 2,
+    AkaSynchronizationFailure = 4,
     AkaIdentity = 5,
     SimStart = 10,
     SimChallenge = 11,
@@ -1164,15 +1331,19 @@ pub enum EapAkaSubTypeCode {
 #[derive(Debug, PartialEq, Clone)]
 pub struct EapAkaSubType {
     raw: u8,
-    code: EapAkaSubTypeCode,
+    pub code: EapAkaSubTypeCode,
 }
 
 impl EapAkaSubType {
     pub fn new(id: u8) -> Self {
-        EapAkaSubType {
+        Self {
             raw: id,
             code: EapAkaSubTypeCode::try_from(id).unwrap_or(EapAkaSubTypeCode::UnKnown),
         }
+    }
+
+    pub fn new_from_stc(stc: EapAkaSubTypeCode) -> Self {
+        Self::new(stc.into())
     }
 }
 
@@ -1184,7 +1355,7 @@ impl StreamWriter for EapAkaSubType {
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4187#section-11
-#[derive(Debug, PartialEq, Clone, TryFromPrimitive)]
+#[derive(Debug, PartialEq, Clone, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum EapAkaAttributeTypeCode {
     AtRand = 1,
@@ -1222,10 +1393,14 @@ pub struct EapAkaAttributeType {
 
 impl EapAkaAttributeType {
     pub fn new(id: u8) -> Self {
-        EapAkaAttributeType {
+        Self {
             raw: id,
             code: EapAkaAttributeTypeCode::try_from(id).unwrap_or(UnKnown),
         }
+    }
+
+    pub fn new_from_tc(code: EapAkaAttributeTypeCode) -> Self {
+        EapAkaAttributeType::new(code.into())
     }
 }
 
@@ -1298,7 +1473,7 @@ pub struct EapAkaAttribute {
 }
 
 impl EapAkaAttribute {
-    fn new(
+    pub fn new(
         attribute_type_code: EapAkaAttributeTypeCode,
         value: EapAkaAttributeValue,
     ) -> Result<Self> {
@@ -1488,6 +1663,17 @@ pub struct EapAkaTypeData {
     pub sub_type: EapAkaSubType,
     pub reserved: u16,
     pub attrs: Vec<EapAkaAttribute>,
+}
+
+impl EapAkaTypeData {
+    pub fn get_attribute_by_type(&self, attribute_type: EapAkaAttributeType) -> Option<EapAkaAttribute> {
+        for x in &self.attrs {
+            if x.attribute_type == attribute_type {
+                return Some(x.clone());
+            }
+        }
+        None
+    }
 }
 
 impl StreamWriter for EapAkaTypeData {
@@ -1718,6 +1904,53 @@ mod tests {
         assert_eq!(h, expected);
     }
 
+
+    #[test]
+    fn test_eap_payload() {
+        let input = &[
+            0x00, 0x00, 0x01, 0xce, 0x00, 0x00, 0x00, 0x4c, 0x01, 0x98, 0x00, 0x44, 0x17, 0x01, 0x00, 0x00,
+            0x01, 0x05, 0x00, 0x00, 0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x72, 0x61, 0x6e, 0x64,
+            0x6f, 0x6d, 0x2e, 0x2e, 0x02, 0x05, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x0b, 0x05, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03,
+            0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        ];
+        let avp = AVP::parse(input).unwrap().1.0;
+
+        let at_rand = EapAkaAttribute::new(
+            EapAkaAttributeTypeCode::AtRand,
+            EapAkaAttributeValue::AtVecValue(0, b"this is random..".to_vec()),
+        ).unwrap();
+        let at_autn = EapAkaAttribute::new(
+            EapAkaAttributeTypeCode::AtAutn,
+            EapAkaAttributeValue::AtVecValue(
+                0,
+                vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            ),
+        ).unwrap();
+        let at_mac = EapAkaAttribute::new(
+            EapAkaAttributeTypeCode::AtMac,
+            EapAkaAttributeValue::AtVecValue(
+                0,
+                vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            ),
+        ).unwrap();
+        let payload = EapPayload::new(
+            EapPayloadCode::new_from_plc(EapPayloadCodeCode::Request),
+            1,
+            EapPayloadType::new_from_tc(EapPayloadTypeCode::Aka),
+            TypeData::EapAka(EapAkaTypeData {
+                sub_type: EapAkaSubType::new_from_stc(EapAkaSubTypeCode::AkaChallenge),
+                reserved: 0,
+                attrs: vec![at_rand, at_autn, at_mac],
+            }),
+        );
+
+        let mut buff = Vec::<u8>::new();
+        let res = payload.write_to(&mut buff, BigEndian);
+
+        println!("{:?}", buff);
+    }
+
     #[test]
     fn test_parse_at_rand_short() {
         let input = &[
@@ -1769,18 +2002,18 @@ mod tests {
             0x0b, 0x05, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
             0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
         ];
-        let attr = EapAkaAttribute::parse(input).unwrap().1 .0;
+        let attr = EapAkaAttribute::parse(input).unwrap().1.0;
         let mut buf = Vec::<u8>::new();
         let _res = attr.write_to(&mut buf, BigEndian);
         println!("{:?}", buf);
-        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1 .0;
+        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1.0;
         println!("{:?}", attr);
 
         let attr = EapAkaAttribute::new(AtAnyIdReq, EapAkaAttributeValue::NoValue).unwrap();
         let mut buf = Vec::<u8>::new();
         let _res = attr.write_to(&mut buf, BigEndian);
         println!("{:?}", buf);
-        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1 .0;
+        let attr = EapAkaAttribute::parse(buf.as_slice()).unwrap().1.0;
         println!("{:?}", attr);
     }
 
@@ -1863,7 +2096,7 @@ mod tests {
         match res {
             Ok(attr) => {
                 let mut buf: Vec<u8> = vec![];
-                let attr = attr.1 .0;
+                let attr = attr.1.0;
                 let _res = attr.write_to(&mut buf, BigEndian);
                 assert_eq!(input, buf.as_slice());
             }
@@ -2047,8 +2280,10 @@ mod tests {
                                         Value::DiameterURI(_) => {}
                                         Value::Address(_) => {}
                                         Value::Time(_) => {}
+                                        Value::None => {}
                                         Value::Eap(eap_payload) => {
                                             match &eap_payload.type_data {
+                                                TypeData::None => {}
                                                 TypeData::Identity(_) => {}
                                                 TypeData::EapAka(eap_aka) => {
                                                     match eap_aka.sub_type.code {
@@ -2087,6 +2322,7 @@ mod tests {
                                                             })
                                                         }
                                                         EapAkaSubTypeCode::AkaAuthenticationReject => {}
+                                                        EapAkaSubTypeCode::AkaSynchronizationFailure => {}
                                                         EapAkaSubTypeCode::AkaIdentity => {}
                                                         EapAkaSubTypeCode::SimStart => {}
                                                         EapAkaSubTypeCode::SimChallenge => {}
@@ -2971,13 +3207,13 @@ mod tests {
             if message.header.is_request() {
                 let response = Message::response_to(
                     &message,
-                    message.avps.iter().map(|m| m.clone()).collect(),
+                    vec![],
                 );
                 match response {
-                    None => {
+                    Err(_) => {
                         eprintln!("No response created");
                     }
-                    Some(response) => {
+                    Ok(response) => {
                         println!("Response: {:?}", response);
                     }
                 }
@@ -3014,5 +3250,63 @@ mod tests {
         let diameter = Diameter {};
 
         assert_eq!(diameter.probe(input, Direction::Unknown), expected);
+    }
+
+    #[test]
+    fn test_copy_avps() {
+        let input = &[
+            0x01, 0x00, 0x01, 0x44, 0xc0, 0x00, 0x01, 0x0c, 0x01, 0x00, 0x00, 0x30, 0x50, 0x5c, 0xc0, 0xec,
+            0x1b, 0xb0, 0x00, 0x14, 0x00, 0x00, 0x01, 0x07, 0x40, 0x00, 0x00, 0x43, 0x30, 0x2e, 0x30, 0x2e,
+            0x30, 0x2e, 0x30, 0x3b, 0x33, 0x39, 0x34, 0x3b, 0x31, 0x33, 0x34, 0x38, 0x32, 0x35, 0x35, 0x39,
+            0x33, 0x37, 0x3b, 0x36, 0x64, 0x65, 0x66, 0x61, 0x64, 0x34, 0x61, 0x2d, 0x65, 0x33, 0x31, 0x64,
+            0x2d, 0x34, 0x34, 0x36, 0x66, 0x2d, 0x61, 0x36, 0x34, 0x34, 0x2d, 0x63, 0x61, 0x35, 0x62, 0x35,
+            0x35, 0x39, 0x32, 0x35, 0x66, 0x62, 0x39, 0x00, 0x00, 0x00, 0x01, 0x02, 0x40, 0x00, 0x00, 0x0c,
+            0x01, 0x00, 0x00, 0x30, 0x00, 0x00, 0x01, 0x1b, 0x40, 0x00, 0x00, 0x29, 0x65, 0x70, 0x63, 0x2e,
+            0x6d, 0x6e, 0x63, 0x30, 0x31, 0x32, 0x2e, 0x6d, 0x63, 0x63, 0x32, 0x34, 0x34, 0x2e, 0x33, 0x67,
+            0x70, 0x70, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x2e, 0x6f, 0x72, 0x67, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x01, 0x08, 0x40, 0x00, 0x00, 0x0f, 0x30, 0x2e, 0x30, 0x2e, 0x30, 0x2e, 0x30, 0x00,
+            0x00, 0x00, 0x01, 0x28, 0x40, 0x00, 0x00, 0x13, 0x74, 0x65, 0x6c, 0x65, 0x6e, 0x6f, 0x72, 0x2e,
+            0x67, 0x72, 0x78, 0x00, 0x00, 0x00, 0x01, 0x12, 0x40, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x03,
+            0x00, 0x00, 0x00, 0x01, 0x40, 0x00, 0x00, 0x3e, 0x30, 0x32, 0x34, 0x34, 0x31, 0x32, 0x30, 0x35,
+            0x35, 0x34, 0x36, 0x31, 0x33, 0x32, 0x35, 0x33, 0x40, 0x6e, 0x61, 0x69, 0x2e, 0x65, 0x70, 0x63,
+            0x2e, 0x6d, 0x6e, 0x63, 0x30, 0x31, 0x32, 0x2e, 0x6d, 0x63, 0x63, 0x32, 0x34, 0x34, 0x2e, 0x33,
+            0x67, 0x70, 0x70, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x2e, 0x6f, 0x72, 0x67, 0x00, 0x00,
+            0x00, 0x00, 0x01, 0xce, 0x40, 0x00, 0x00, 0x43, 0x02, 0x98, 0x00, 0x3b, 0x01, 0x30, 0x32, 0x34,
+            0x34, 0x31, 0x32, 0x30, 0x35, 0x35, 0x34, 0x36, 0x31, 0x33, 0x32, 0x35, 0x33, 0x40, 0x6e, 0x61,
+            0x69, 0x2e, 0x65, 0x70, 0x63, 0x2e, 0x6d, 0x6e, 0x63, 0x30, 0x31, 0x32, 0x2e, 0x6d, 0x63, 0x63,
+            0x32, 0x34, 0x34, 0x2e, 0x33, 0x67, 0x70, 0x70, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x2e,
+            0x6f, 0x72, 0x67, 0x00,
+        ];
+        let diameter = Diameter {};
+        let res = diameter.parse(input, Direction::Unknown);
+        let message = res.unwrap().1.unwrap();
+
+        println!("{:?}", message);
+
+        let response = Message::response_to(&message, vec![]).unwrap();
+
+        print!("{:?}", response);
+    }
+
+    #[test]
+    fn test_parse_response() {
+        let input = &[
+            0x01, 0x00, 0x00, 0xa4, 0x40, 0x00, 0x01, 0x0c, 0x01, 0x00, 0x00, 0x30, 0x50, 0x5c, 0xc0, 0xee,
+            0x1b, 0xb0, 0x00, 0x1a, 0x00, 0x00, 0x01, 0x07, 0x40, 0x00, 0x00, 0x43, 0x30, 0x2e, 0x30, 0x2e,
+            0x30, 0x2e, 0x30, 0x3b, 0x33, 0x39, 0x34, 0x3b, 0x31, 0x33, 0x34, 0x38, 0x32, 0x35, 0x35, 0x39,
+            0x33, 0x39, 0x3b, 0x32, 0x36, 0x65, 0x34, 0x31, 0x66, 0x61, 0x63, 0x2d, 0x38, 0x65, 0x66, 0x35,
+            0x2d, 0x34, 0x61, 0x38, 0x39, 0x2d, 0x39, 0x35, 0x30, 0x64, 0x2d, 0x32, 0x65, 0x38, 0x36, 0x36,
+            0x32, 0x36, 0x62, 0x30, 0x32, 0x34, 0x39, 0x00, 0x00, 0x00, 0x01, 0x02, 0x40, 0x00, 0x00, 0x0c,
+            0x01, 0x00, 0x00, 0x30, 0x00, 0x00, 0x01, 0x0c, 0x40, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x07, 0xd1,
+            0x00, 0x00, 0x01, 0xce, 0x40, 0x00, 0x00, 0x0c, 0x03, 0x29, 0x00, 0x04, 0x00, 0x00, 0x01, 0xbb,
+            0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x01, 0xbc, 0x00, 0x00, 0x00, 0x13, 0x33, 0x35, 0x38, 0x34,
+            0x31, 0x37, 0x33, 0x37, 0x31, 0x31, 0x34, 0x00, 0x00, 0x00, 0x01, 0xc2, 0x00, 0x00, 0x00, 0x0c,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let diameter = Diameter {};
+        let res = diameter.parse(input, Direction::Unknown);
+        let message = res.unwrap().1.unwrap();
+
+        println!("{:?}", message);
     }
 }
