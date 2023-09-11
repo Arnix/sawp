@@ -350,7 +350,7 @@ impl Value {
             },
             Value::Time(time) => size_of_val(time),
             Value::Eap(eap) => eap.length as usize,
-            Value::None => { 0usize },
+            Value::None => { 0usize }
         }
     }
 
@@ -367,18 +367,18 @@ impl Value {
                     be_u8(data)?
                 } else {
                     // TODO: figure out how to do this
-                    let x : &[u8] = b"";
+                    let x: &[u8] = b"";
                     (x, 0u8)
                 };
 
                 match EapPayloadType::new(raw_type).code {
                     EapPayloadTypeCode::None => {
                         let eap_payload = EapPayload {
-                            code : EapPayloadCode::new(raw_code),
+                            code: EapPayloadCode::new(raw_code),
                             identifier,
                             length,
-                            payload_type : EapPayloadType::new(raw_type),
-                            type_data : TypeData::None,
+                            payload_type: EapPayloadType::new(raw_type),
+                            type_data: TypeData::None,
                         };
                         Ok((&[], (Value::Eap(eap_payload), ErrorFlags::NONE)))
                     }
@@ -612,7 +612,7 @@ impl StreamWriter for Value {
             }
             Value::Eap(val) => {
                 val.write_to(buffer, order)?;
-            },
+            }
             Value::None => {}
         }
         Ok(())
@@ -643,6 +643,7 @@ bitflags! {
         const NON_ZERO_PADDING = 0b0000_1000;
     }
 }
+
 
 #[derive(Debug, PartialEq)]
 pub struct Message {
@@ -1135,7 +1136,7 @@ impl Message {
     }
 
     #[allow(dead_code)]
-    pub fn copy_basic_avps<'a>(src_message: &'a Message, avps: &mut Vec::<&'a AVP>, _invert_points: bool) {
+    pub fn copy_basic_avps<'a>(src_message: &'a Message, avps: &mut Vec<&'a AVP>, _invert_points: bool) {
         src_message.avp_by_code(AttributeCode::SessionId).map(|avp| avps.push(avp.into()));
         src_message.avp_by_code(AttributeCode::AcctSessionId).map(|avp| avps.push(avp));
         src_message.avp_by_code(AttributeCode::AccountingSubSessionId).map(|avp| avps.push(avp));
@@ -1146,7 +1147,7 @@ impl Message {
         src_message.avp_by_code(AttributeCode::ProxyInfo).map(|avp| avps.push(avp));
     }
 
-    pub fn copy_basic_avps2(src_message: &Message, avps: &mut Vec::<AVP>, _invert_points: bool) {
+    pub fn copy_basic_avps2(src_message: &Message, avps: &mut Vec<AVP>, _invert_points: bool) {
         src_message.avp_by_code(AttributeCode::SessionId).map(|avp| avps.push(avp.clone()));
         src_message.avp_by_code(AttributeCode::AcctSessionId).map(|avp| avps.push(avp.clone()));
         src_message.avp_by_code(AttributeCode::AccountingSubSessionId).map(|avp| avps.push(avp.clone()));
@@ -1249,7 +1250,7 @@ impl StreamWriter for EapPayloadType {
 pub enum TypeData {
     Identity(String),
     EapAka(EapAkaTypeData),
-    None
+    None,
 }
 
 impl StreamWriter for TypeData {
@@ -1473,6 +1474,7 @@ pub struct EapAkaAttribute {
 }
 
 impl EapAkaAttribute {
+    // Must go through these and fix up, write unit tests
     pub fn new(
         attribute_type_code: EapAkaAttributeTypeCode,
         value: EapAkaAttributeValue,
@@ -1491,7 +1493,7 @@ impl EapAkaAttribute {
                 }
                 _ => Err(Error::from(InvalidData)),
             },
-            AtRes | AtIdentity | AtNextPseudonym | AtNextReauthId => match value {
+            AtRes | AtIdentity | AtNextPseudonym | AtNextReauthId | AtEncData => match value {
                 EapAkaAttributeValue::AtVecValue(len, mut data) => {
                     sanitize_data_len(len, &data, &attribute_type_code)?;
 
@@ -1552,11 +1554,11 @@ impl EapAkaAttribute {
                 }
                 _ => Err(Error::from(InvalidData)),
             },
-            AtEncData | AtNonceMt | AtNotification | AtVersionList | AtSelectedVersion
+            AtNonceMt | AtNotification | AtVersionList | AtSelectedVersion
             | UnKnown => Err(Error::from(InvalidData)),
         }
     }
-
+    // Must go through these and fix up, write unit tests
     fn parse(input: &[u8]) -> IResult<&[u8], (Self, ErrorFlags)> {
         let (input, raw_eap_aka_att_type) = be_u8(input)?;
         let attribute_type = EapAkaAttributeType::new(raw_eap_aka_att_type);
@@ -1564,7 +1566,7 @@ impl EapAkaAttribute {
         let mut remaining: &[u8] = &[];
 
         let value: EapAkaAttributeValue = match attribute_type.code {
-            AtPermanentIdReq | AtAnyIdReq | AtFullAuthIdReq => {
+            AtPermanentIdReq | AtAnyIdReq | AtFullAuthIdReq  | AtResultInd | AtCounterTooSmall => {
                 assert_eq!(length, 1);
                 EapAkaAttributeValue::NoValue
             }
@@ -1581,7 +1583,7 @@ impl EapAkaAttribute {
                     }
                 }
             }
-            AtRand | AtAutn | AtMac | AtIv | AtNonceS => {
+            AtRand | AtAutn | AtMac | AtIv | AtNonceS  => {
                 let (input, reserved) = be_u16(input)?;
                 let (input, val) = take(16usize)(input)?;
                 // debug_assert_eq!(input.len(), 0);
@@ -1600,9 +1602,23 @@ impl EapAkaAttribute {
                 remaining = input;
                 EapAkaAttributeValue::AtVecValue(res_length, val.to_vec())
             }
-            AtAuts | AtPadding | AtNonceMt | AtNotification | AtVersionList | AtSelectedVersion
-            | AtCounter | AtCounterTooSmall | AtClientErrorCode | AtEncData | AtNextPseudonym
-            | AtNextReauthId | AtCheckCode | AtResultInd | UnKnown => EapAkaAttributeValue::Unknown,
+            AtAuts => {
+                let (input, val) = take(14usize)(input)?;
+                debug_assert_eq!(length, 4);
+                remaining = input;
+                EapAkaAttributeValue::AtVecValue(0, val.to_vec())
+            }
+            AtEncData => {
+                let (input, reserved) = be_u16(input)?;
+                let content_len = ((length - 1) * 4) as usize;
+                let (input, val) = take(content_len)(input)?;
+                remaining = input;
+                assert_eq!(0, reserved);
+                EapAkaAttributeValue::AtVecValue(0, val.to_vec())
+            }
+            AtPadding | AtNonceMt | AtNotification | AtVersionList | AtSelectedVersion
+            | AtCounter | AtClientErrorCode | AtNextPseudonym
+            | AtNextReauthId | AtCheckCode | UnKnown => EapAkaAttributeValue::Unknown,
         };
         Ok((
             remaining,
@@ -1914,7 +1930,7 @@ mod tests {
             0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x0b, 0x05, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03,
             0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
         ];
-        let avp = AVP::parse(input).unwrap().1.0;
+        let _avp = AVP::parse(input).unwrap().1.0;
 
         let at_rand = EapAkaAttribute::new(
             EapAkaAttributeTypeCode::AtRand,
@@ -1946,7 +1962,7 @@ mod tests {
         );
 
         let mut buff = Vec::<u8>::new();
-        let res = payload.write_to(&mut buff, BigEndian);
+        let _res = payload.write_to(&mut buff, BigEndian);
 
         println!("{:?}", buff);
     }
@@ -3308,5 +3324,77 @@ mod tests {
         let message = res.unwrap().1.unwrap();
 
         println!("{:?}", message);
+    }
+
+    #[test]
+    fn parse_dna_response() {
+        let input = &[
+            0x01, 0x00, 0x00, 0xf8, 0x40, 0x00, 0x01, 0x0c, 0x01, 0x00, 0x00, 0x30, 0x75, 0x05, 0xc0, 0xb3,
+            0x44, 0xa0, 0x01, 0x9f, 0x00, 0x00, 0x01, 0x07, 0x40, 0x00, 0x00, 0x43, 0x30, 0x2e, 0x30, 0x2e,
+            0x30, 0x2e, 0x30, 0x3b, 0x33, 0x39, 0x34, 0x3b, 0x31, 0x39, 0x36, 0x33, 0x33, 0x31, 0x31, 0x31,
+            0x37, 0x31, 0x3b, 0x35, 0x32, 0x32, 0x61, 0x36, 0x34, 0x64, 0x37, 0x2d, 0x62, 0x63, 0x62, 0x34,
+            0x2d, 0x34, 0x31, 0x30, 0x64, 0x2d, 0x39, 0x66, 0x36, 0x36, 0x2d, 0x65, 0x65, 0x37, 0x63, 0x63,
+            0x39, 0x61, 0x39, 0x39, 0x37, 0x32, 0x30, 0x00, 0x00, 0x00, 0x01, 0x02, 0x40, 0x00, 0x00, 0x0c,
+            0x01, 0x00, 0x00, 0x30, 0x00, 0x00, 0x01, 0x0c, 0x40, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x03, 0xe9,
+            0x00, 0x00, 0x01, 0xce, 0x00, 0x00, 0x00, 0x88, 0x01, 0xf0, 0x00, 0x80, 0x17, 0x01, 0x00, 0x00,
+            0x01, 0x05, 0x00, 0x00, 0x83, 0xf6, 0x86, 0xc0, 0x09, 0xce, 0xe6, 0xfc, 0xd5, 0xa5, 0x90, 0x41,
+            0x97, 0x5e, 0x24, 0x38, 0x02, 0x05, 0x00, 0x00, 0x76, 0x32, 0x67, 0xb5, 0x8a, 0x00, 0x00, 0x00,
+            0x74, 0xb2, 0x2a, 0x37, 0x8e, 0xe3, 0x26, 0x96, 0x0b, 0x05, 0x00, 0x00, 0x99, 0x73, 0x3b, 0xe7,
+            0xbd, 0xb5, 0x16, 0xb6, 0xe4, 0xf0, 0xe2, 0xf7, 0xfc, 0xe0, 0xbd, 0x5d, 0x87, 0x01, 0x00, 0x00,
+            0x81, 0x05, 0x00, 0x00, 0xe1, 0x70, 0x1b, 0x5f, 0x79, 0x5f, 0x44, 0xd4, 0xcc, 0x1c, 0xe9, 0xcc,
+            0xec, 0x94, 0xd6, 0x09, 0x82, 0x09, 0x00, 0x00, 0x99, 0xaa, 0xf1, 0xce, 0x2d, 0x28, 0xfc, 0x31,
+            0x02, 0xc5, 0x9b, 0xd5, 0xed, 0x38, 0x57, 0xb1, 0x48, 0x9b, 0x06, 0x4e, 0xfd, 0xa5, 0x1c, 0xa0,
+            0xf6, 0x6f, 0x5a, 0x0c, 0x7d, 0xff, 0x82, 0x6d,
+        ];
+        let diameter = Diameter {};
+        let res = diameter.parse(input, Direction::Unknown);
+        let message = res.unwrap().1.unwrap();
+
+        println!("{:?}", message);
+    }
+
+    #[test]
+    fn parse_eap_aka_attributes() {
+        let iv_input = &[
+            0x81, 0x05, 0x00, 0x00, 0xe1, 0x70, 0x1b, 0x5f, 0x79, 0x5f, 0x44, 0xd4, 0xcc, 0x1c, 0xe9, 0xcc, 0xec, 0x94, 0xd6, 0x09
+        ];
+        let ed_input = &[
+            0x82, 0x09, 0x00, 0x00, 0x99, 0xaa, 0xf1, 0xce, 0x2d, 0x28, 0xfc, 0x31, 0x02, 0xc5, 0x9b, 0xd5,
+            0xed, 0x38, 0x57, 0xb1, 0x48, 0x9b, 0x06, 0x4e, 0xfd, 0xa5, 0x1c, 0xa0, 0xf6, 0x6f, 0x5a, 0x0c,
+            0x7d, 0xff, 0x82, 0x6d,
+        ];
+
+        let ri_input = &[
+            0x87, 0x01, 0x00, 0x00
+        ];
+
+        let att = EapAkaAttribute::parse(iv_input);
+        match att {
+            Ok((_,(att, _))) => {
+                assert_eq!(EapAkaAttributeTypeCode::AtIv, att.attribute_type.code);
+            }
+            Err(_) => {
+                panic!("Should not be here")
+            }
+        }
+        let att = EapAkaAttribute::parse(ri_input);
+        match att {
+            Ok((_,(att, _))) => {
+                assert_eq!(EapAkaAttributeTypeCode::AtResultInd, att.attribute_type.code);
+            }
+            Err(_) => {
+                panic!("Should not be here")
+            }
+        }
+        let att = EapAkaAttribute::parse(ed_input);
+        match att {
+            Ok((_,(att, _))) => {
+                assert_eq!(EapAkaAttributeTypeCode::AtEncData, att.attribute_type.code);
+            }
+            Err(_) => {
+                panic!("Should not be here")
+            }
+        }
+
     }
 }
