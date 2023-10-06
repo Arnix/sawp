@@ -627,7 +627,7 @@ pub struct AVP {
     // Actually u24
     pub vendor_id: Option<u32>,
     pub value: Value,
-    padding: Vec<u8>,
+    pub padding: Vec<u8>,
 }
 
 bitflags! {
@@ -676,7 +676,7 @@ fn length(read: usize) -> impl Fn(&[u8]) -> IResult<&[u8], u32> {
 }
 
 impl Header {
-    const SIZE: usize = 20;
+    pub const SIZE: usize = 20;
     // Number of bytes included in length that are before and
     // including the length field
     const PRE_LENGTH_SIZE: usize = 4;
@@ -1111,6 +1111,14 @@ impl StreamWriter for AVP {
 }
 
 impl Message {
+    pub fn new(header : Header, avps: Vec<AVP>) -> std::result::Result<Message, TypeError> {
+        Ok(Self {
+            header,
+            avps,
+            error_flags: ErrorFlags::NONE,
+        })
+    }
+
     pub fn response_to(message: &Message, avps: Vec<AVP>) -> std::result::Result<Message, TypeError> {
         if !message.header.is_request() {
             return Err(TypeError::from("Cannot make response for response"));
@@ -1788,6 +1796,14 @@ mod tests {
 
         let e1 = EapPayloadType::new_from_tc(EapPayloadTypeCode::Identity);
         assert_eq!(e1.code, EapPayloadTypeCode::Identity);
+    }
+
+    #[test]
+    fn test_h() {
+        let input  = &[1, 0, 0, 172, 128, 0, 1, 1, 0, 0, 0, 0, 0, 0, 18, 52, 0, 0, 35, 69];
+
+        let h = Header::parse(input);
+        println!("{:?}", h)
     }
 
     #[test]
