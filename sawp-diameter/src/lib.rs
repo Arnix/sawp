@@ -19,6 +19,7 @@ use nom::error::ErrorKind;
 use nom::multi::many0;
 use nom::number::streaming::{be_u16, be_u24, be_u32, be_u64, be_u8};
 use nom::IResult;
+use rand::SeedableRng;
 
 use bytestream::*;
 use std::io::*;
@@ -29,7 +30,20 @@ use sawp::error::ErrorKind::InvalidData;
 use std::convert::TryFrom;
 use std::mem::size_of_val;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Mutex;
+use lazy_static::lazy_static;
 use EapAkaAttributeTypeCode::*;
+use rand::{Rng};
+use rand_chacha::ChaCha8Rng;
+
+lazy_static! {
+    static ref RANDOM: Mutex<ChaCha8Rng> = Mutex::new(ChaCha8Rng::from_entropy());
+}
+
+pub fn next_end_id() -> u32 {
+    let mut rng = RANDOM.lock().unwrap();
+    rng.gen()
+}
 
 #[derive(Debug)]
 pub struct Diameter {}
@@ -191,15 +205,41 @@ impl StreamWriter for Command {
 // 8 + 24 + 8 + 24 + 32 + 32 + 32 bits
 #[derive(Debug, PartialEq)]
 pub struct Header {
-    pub version: u8,
+    version: u8,
     // actually 24 bites on wire
-    pub length: u32,
+    length: u32,
     pub flags: u8,
     // actually 24 bits on wire
-    pub code: Command,
-    pub app_id: u32,
-    pub hop_id: u32,
-    pub end_id: u32,
+    code: Command,
+    app_id: u32,
+    hop_id: u32,
+    end_id: u32,
+}
+
+impl Header {
+    pub fn new(length : u32, flags : u8, code : Command, app_id : u32, hop_id : u32) -> Self {
+        Self {
+            version: 0x1,
+            length,
+            flags,
+            code,
+            app_id,
+            hop_id,
+            end_id: next_end_id(),
+        }
+    }
+
+    pub fn code(&self) -> Command {
+        self.code
+    }
+
+    pub fn hop_id(&self) -> u32 {
+        self.hop_id
+    }
+
+    pub fn end_id(&self) -> u32 {
+        self.end_id
+    }
 }
 
 impl StreamWriter for Header {
@@ -1119,6 +1159,25 @@ impl Message {
         })
     }
 
+    pub fn new_request(code: Command, app_id: u32, hop_id: u32, avps: Vec<AVP>) -> std::result::Result<Message, TypeError> {
+        Ok(Message {
+            header: Header::new(
+                Header::SIZE as u32
+                    + avps
+                    .iter()
+                    .map(|avp| avp.length + avp.padding.len() as u32)
+                    .sum::<u32>(),
+                Header::REQUEST_FLAG,
+                code,
+                app_id,
+                hop_id,
+            ),
+            avps,
+            error_flags: ErrorFlags::NONE,
+        })
+    }
+
+
     pub fn response_to(message: &Message, avps: Vec<AVP>) -> std::result::Result<Message, TypeError> {
         if !message.header.is_request() {
             return Err(TypeError::from("Cannot make response for response"));
@@ -1949,18 +2008,18 @@ mod tests {
         let _avp = AVP::parse(input).unwrap().1.0;
 
         let at_rand = EapAkaAttribute::new(
-            EapAkaAttributeTypeCode::AtRand,
+            AtRand,
             EapAkaAttributeValue::AtVecValue(0, b"this is random..".to_vec()),
         ).unwrap();
         let at_autn = EapAkaAttribute::new(
-            EapAkaAttributeTypeCode::AtAutn,
+            AtAutn,
             EapAkaAttributeValue::AtVecValue(
                 0,
                 vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             ),
         ).unwrap();
         let at_mac = EapAkaAttribute::new(
-            EapAkaAttributeTypeCode::AtMac,
+            AtMac,
             EapAkaAttributeValue::AtVecValue(
                 0,
                 vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
@@ -3387,7 +3446,7 @@ mod tests {
         let att = EapAkaAttribute::parse(iv_input);
         match att {
             Ok((_,(att, _))) => {
-                assert_eq!(EapAkaAttributeTypeCode::AtIv, att.attribute_type.code);
+                assert_eq!(AtIv, att.attribute_type.code);
             }
             Err(_) => {
                 panic!("Should not be here")
@@ -3396,7 +3455,7 @@ mod tests {
         let att = EapAkaAttribute::parse(ri_input);
         match att {
             Ok((_,(att, _))) => {
-                assert_eq!(EapAkaAttributeTypeCode::AtResultInd, att.attribute_type.code);
+                assert_eq!(AtResultInd, att.attribute_type.code);
             }
             Err(_) => {
                 panic!("Should not be here")
@@ -3405,7 +3464,7 @@ mod tests {
         let att = EapAkaAttribute::parse(ed_input);
         match att {
             Ok((_,(att, _))) => {
-                assert_eq!(EapAkaAttributeTypeCode::AtEncData, att.attribute_type.code);
+                assert_eq!(AtEncData, att.attribute_type.code);
             }
             Err(_) => {
                 panic!("Should not be here")
