@@ -20,6 +20,7 @@ use nom::multi::many0;
 use nom::number::streaming::{be_u16, be_u24, be_u32, be_u64, be_u8};
 use nom::IResult;
 use rand::SeedableRng;
+use bytestream::ByteOrder::BigEndian;
 
 use bytestream::*;
 use std::io::*;
@@ -237,6 +238,10 @@ impl Header {
         self.hop_id
     }
 
+    pub fn set_hop_id(&mut self, hop_id : u32) {
+        self.hop_id = hop_id;
+    }
+
     pub fn end_id(&self) -> u32 {
         self.end_id
     }
@@ -297,6 +302,7 @@ pub enum AttributeCode {
     ProxyHost = 280,
     ProxyInfo = 284,
     ProxyState = 33,
+    RatType = 1032,
     RedirectHost = 292,
     RedirectHostUsage = 261,
     RedirectMaxCacheTime = 262,
@@ -463,6 +469,7 @@ impl Value {
             | AttributeCode::InbandSecurityId
             | AttributeCode::MultiRoundTimeOut
             | AttributeCode::OriginStateId
+            | AttributeCode::RatType
             | AttributeCode::RedirectMaxCacheTime
             | AttributeCode::ResultCode
             | AttributeCode::SessionTimeout
@@ -1001,6 +1008,7 @@ impl AVP {
             | AttributeCode::InbandSecurityId
             | AttributeCode::MultiRoundTimeOut
             | AttributeCode::OriginStateId
+            | AttributeCode::RatType
             | AttributeCode::RedirectMaxCacheTime
             | AttributeCode::ResultCode
             | AttributeCode::SessionTimeout
@@ -1160,7 +1168,7 @@ impl Message {
     }
 
     pub fn new_request(code: Command, app_id: u32, hop_id: u32, avps: Vec<AVP>) -> std::result::Result<Message, TypeError> {
-        Ok(Message {
+        Ok(Self {
             header: Header::new(
                 Header::SIZE as u32
                     + avps
@@ -1197,6 +1205,15 @@ impl Message {
             error_flags: ErrorFlags::NONE,
         })
     }
+
+    pub fn clone_message(message: &Message) -> Message {
+        let mut buf: Vec<u8> = Vec::new();
+        let _res = message.write_to(&mut buf, BigEndian);
+        let diameter = Diameter {};
+        let cloned_message = diameter.parse_ext(buf.as_slice()).unwrap();
+        cloned_message.1.unwrap()
+    }
+
 
     pub fn avp_by_code(&self, code: AttributeCode) -> Option<&AVP> {
         self.avps.iter().filter(|avp| { avp.attribute.code == code }).collect::<Vec<&AVP>>().get(0).copied()
