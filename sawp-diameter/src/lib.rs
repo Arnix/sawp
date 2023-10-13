@@ -7,6 +7,7 @@
 // #[macro_use]
 //extern crate num_derive;
 
+use std::collections::HashSet;
 use sawp::error::{Error, NomError, Result};
 use sawp::parser::{Direction, Parse};
 use sawp::probe::Probe;
@@ -1216,7 +1217,11 @@ impl Message {
 
 
     pub fn avp_by_code(&self, code: AttributeCode) -> Option<&AVP> {
-        self.avps.iter().filter(|avp| { avp.attribute.code == code }).collect::<Vec<&AVP>>().get(0).copied()
+        Message::avp_by_code_f(&self.avps, code)
+    }
+
+    pub fn avp_by_code_f<'a>(avps : &'a Vec<AVP>, code: AttributeCode) -> Option<&'a AVP> {
+        avps.iter().filter(|avp| { avp.attribute.code == code }).collect::<Vec<&AVP>>().get(0).copied()
     }
 
     #[allow(dead_code)]
@@ -1240,6 +1245,21 @@ impl Message {
         src_message.avp_by_code(AttributeCode::AcctApplicationId).map(|avp| avps.push(avp.clone()));
         src_message.avp_by_code(AttributeCode::AuthApplicationId).map(|avp| avps.push(avp.clone()));
         src_message.avp_by_code(AttributeCode::ProxyInfo).map(|avp| avps.push(avp.clone()));
+    }
+
+    pub fn result_code_matches(&self, candidates : Vec<u32>) -> bool {
+        let set : HashSet<u32> = HashSet::from_iter(candidates);
+        match self.avp_by_code(AttributeCode::ResultCode) {
+            None => false,
+            Some(rc) => {
+                match rc.value {
+                    Value::Unsigned32(rc) => {
+                        return set.contains(&rc)
+                    },
+                    _ => false
+                }
+            }
+        }
     }
 }
 
