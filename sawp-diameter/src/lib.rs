@@ -12,6 +12,7 @@ use sawp::error::{Error, NomError, Result};
 use sawp::parser::{Direction, Parse};
 use sawp::probe::Probe;
 use sawp::protocol::Protocol;
+use sawp_flags::{BitFlags, Flag, Flags};
 
 use nom::bytes::streaming::tag;
 use nom::bytes::streaming::take;
@@ -205,7 +206,7 @@ impl StreamWriter for Command {
 
 // 20 bytes fixed size
 // 8 + 24 + 8 + 24 + 32 + 32 + 32 bits
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Header {
     version: u8,
     // actually 24 bites on wire
@@ -263,7 +264,7 @@ impl StreamWriter for Header {
 }
 
 /// AVP Attribute Names as stated in the [protocol reference](https://tools.ietf.org/html/rfc6733#section-4.5)
-#[derive(Debug, PartialEq, Clone, TryFromPrimitive, IntoPrimitive)]
+#[derive(Debug, PartialEq, Eq, Clone, TryFromPrimitive, IntoPrimitive)]
 #[repr(u32)]
 pub enum AttributeCode {
     Unknown = 0,
@@ -323,7 +324,7 @@ pub enum AttributeCode {
     VendorSpecificApplicationId = 260,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Attribute {
     /// Value of the code in AVP header
     raw: u32,
@@ -404,7 +405,7 @@ impl Value {
     pub fn new<'a>(code: &AttributeCode, data: &'a [u8]) -> IResult<&'a [u8], (Self, ErrorFlags)> {
         match code {
             AttributeCode::AcctSessionId | AttributeCode::ProxyState => {
-                Ok((&[], (Value::OctetString(data.into()), ErrorFlags::NONE)))
+                Ok((&[], (Value::OctetString(data.into()), ErrorFlags::none())))
             }
             AttributeCode::EapPayLoad => {
                 let (data, raw_code) = be_u8(data)?;
@@ -478,11 +479,11 @@ impl Value {
             | AttributeCode::SupportedVendorId
             | AttributeCode::VendorId => {
                 let (input, val) = be_u32(data)?;
-                Ok((input, (Value::Unsigned32(val), ErrorFlags::NONE)))
+                Ok((input, (Value::Unsigned32(val), ErrorFlags::none())))
             }
             AttributeCode::AccountingSubSessionId => {
                 let (input, val) = be_u64(data)?;
-                Ok((input, (Value::Unsigned64(val), ErrorFlags::NONE)))
+                Ok((input, (Value::Unsigned64(val), ErrorFlags::none())))
             }
             AttributeCode::AccountingRealtimeRequired
             | AttributeCode::AccountingRecordType
@@ -495,7 +496,7 @@ impl Value {
             | AttributeCode::SubscriptionIdType
             | AttributeCode::TerminationCause => {
                 let (input, val) = be_u32(data)?;
-                Ok((input, (Value::Enumerated(val), ErrorFlags::NONE)))
+                Ok((input, (Value::Enumerated(val), ErrorFlags::none())))
             }
             AttributeCode::ExperimentalResult
             | AttributeCode::FailedAVP
@@ -512,8 +513,11 @@ impl Value {
             | AttributeCode::SessionId
             | AttributeCode::SubscriptionIdData
             | AttributeCode::UserName => match String::from_utf8(data.to_vec()) {
-                Ok(string) => Ok((&[], (Value::UTF8String(string), ErrorFlags::NONE))),
-                Err(_) => Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::DATA_VALUE))),
+                Ok(string) => Ok((&[], (Value::UTF8String(string), ErrorFlags::none()))),
+                Err(_) => Ok((
+                    &[],
+                    (Value::Unhandled(data.into()), ErrorFlags::DataValue.into()),
+                )),
             },
             AttributeCode::DestinationHost
             | AttributeCode::DestinationRealm
@@ -522,12 +526,18 @@ impl Value {
             | AttributeCode::OriginRealm
             | AttributeCode::ProxyHost
             | AttributeCode::RouteRecord => match String::from_utf8(data.to_vec()) {
-                Ok(string) => Ok((&[], (Value::DiameterIdentity(string), ErrorFlags::NONE))),
-                Err(_) => Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::DATA_VALUE))),
+                Ok(string) => Ok((&[], (Value::DiameterIdentity(string), ErrorFlags::none()))),
+                Err(_) => Ok((
+                    &[],
+                    (Value::Unhandled(data.into()), ErrorFlags::DataValue.into()),
+                )),
             },
             AttributeCode::RedirectHost => match String::from_utf8(data.to_vec()) {
-                Ok(string) => Ok((&[], (Value::DiameterURI(string), ErrorFlags::NONE))),
-                Err(_) => Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::DATA_VALUE))),
+                Ok(string) => Ok((&[], (Value::DiameterURI(string), ErrorFlags::none()))),
+                Err(_) => Ok((
+                    &[],
+                    (Value::Unhandled(data.into()), ErrorFlags::DataValue.into()),
+                )),
             },
             AttributeCode::HostIPAddress => match data.len() {
                 4 => Ok((
@@ -537,7 +547,7 @@ impl Value {
                         Value::Address(IpAddr::V4(Ipv4Addr::from(
                             <[u8; 4]>::try_from(data).unwrap(),
                         ))),
-                        ErrorFlags::NONE,
+                        ErrorFlags::none(),
                     ),
                 )),
                 16 => Ok((
@@ -547,19 +557,19 @@ impl Value {
                         Value::Address(IpAddr::V6(Ipv6Addr::from(
                             <[u8; 16]>::try_from(data).unwrap(),
                         ))),
-                        ErrorFlags::NONE,
+                        ErrorFlags::none(),
                     ),
                 )),
                 _ => Ok((
                     &[],
-                    (Value::Unhandled(data.into()), ErrorFlags::DATA_LENGTH),
+                    (Value::Unhandled(data.into()), ErrorFlags::DataLength.into()),
                 )),
             },
             AttributeCode::EventTimestamp => {
                 let (input, seconds) = be_u32(data)?;
-                Ok((input, (Value::Time(seconds), ErrorFlags::NONE)))
+                Ok((input, (Value::Time(seconds), ErrorFlags::none())))
             }
-            _ => Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::NONE))),
+            _ => Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::none()))),
         }
     }
 
@@ -678,18 +688,17 @@ pub struct AVP {
     pub padding: Vec<u8>,
 }
 
-bitflags! {
-    /// Flags identify messages which parse successfully
-    /// but contain invalid data. The caller can use the message's
-    /// error flags to see if and what errors were in the
-    /// pack of bytes and take action using this information.
-    pub struct ErrorFlags: u8 {
-        const NONE = 0b0000_0000;
-        const DATA_VALUE = 0b0000_0001;
-        const DATA_LENGTH = 0b0000_0010;
-        const NON_ZERO_RESERVED = 0b0000_0100;
-        const NON_ZERO_PADDING = 0b0000_1000;
-    }
+/// Flags identify messages which parse successfully
+/// but contain invalid data. The caller can use the message's
+/// error flags to see if and what errors were in the
+/// pack of bytes and take action using this information.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, BitFlags)]
+pub enum ErrorFlags {
+    DataValue = 0b0000_0001,
+    DataLength = 0b0000_0010,
+    NonZeroReserved = 0b0000_0100,
+    NonZeroPadding = 0b0000_1000,
 }
 
 
@@ -697,7 +706,7 @@ bitflags! {
 pub struct Message {
     pub header: Header,
     pub avps: Vec<AVP>,
-    pub error_flags: ErrorFlags,
+    pub error_flags: Flags<ErrorFlags>,
 }
 
 /// Create a parser to read diameter length and ensure input is long enough
@@ -779,8 +788,8 @@ impl Header {
         (self.length as usize) - Self::SIZE
     }
 
-    pub fn parse(input: &[u8]) -> IResult<&[u8], (Self, ErrorFlags)> {
-        let mut error_flags = ErrorFlags::NONE;
+    pub fn parse(input: &[u8]) -> IResult<&[u8], (Self, Flags<ErrorFlags>)> {
+        let mut error_flags = ErrorFlags::none();
         let (input, version) = tag(&[1u8])(input)?;
         let (input, length) = length(Self::PRE_LENGTH_SIZE)(input)?;
         if (length as usize) < Self::SIZE {
@@ -791,7 +800,7 @@ impl Header {
         }
         let (input, flags) = be_u8(input)?;
         if Self::reserved_set(flags) {
-            error_flags |= ErrorFlags::NON_ZERO_RESERVED;
+            error_flags |= ErrorFlags::NonZeroReserved;
         }
         let (input, code) = be_u24(input)?;
         let (input, app_id) = be_u32(input)?;
@@ -913,12 +922,12 @@ impl AVP {
         self.flags & Self::RESERVED_MASK
     }
 
-    pub fn parse(input: &[u8]) -> IResult<&[u8], (Self, ErrorFlags)> {
-        let mut error_flags = ErrorFlags::NONE;
+    pub fn parse(input: &[u8]) -> IResult<&[u8], (Self, Flags<ErrorFlags>)> {
+        let mut error_flags = ErrorFlags::none();
         let (input, raw_code) = be_u32(input)?;
         let (input, flags) = be_u8(input)?;
         if Self::reserved_set(flags) {
-            error_flags |= ErrorFlags::NON_ZERO_RESERVED;
+            error_flags |= ErrorFlags::NonZeroReserved;
         }
         let (input, length) = length(Self::PRE_LENGTH_SIZE)(input)?;
         let header_size = if Self::vendor_specific_flag(flags) {
@@ -943,13 +952,13 @@ impl AVP {
         let (input, data) = take(data_length)(input)?;
         let (input, padding) = take(Self::padding(data_length))(input)?;
         if !padding.iter().all(|&item| item == 0) {
-            error_flags |= ErrorFlags::NON_ZERO_PADDING;
+            error_flags |= ErrorFlags::NonZeroPadding;
         }
         let attribute = Attribute::new(raw_code);
         let value = match Value::new(&attribute.code, data) {
             Ok((rest, (value, flags))) => {
                 if !rest.is_empty() {
-                    error_flags |= ErrorFlags::DATA_LENGTH;
+                    error_flags |= ErrorFlags::DataLength;
                 }
                 error_flags |= flags;
                 value
@@ -959,11 +968,11 @@ impl AVP {
                                     code: ErrorKind::LengthValue,
                                 }))
             | Err(nom::Err::Incomplete(_)) => {
-                error_flags |= ErrorFlags::DATA_LENGTH;
+                error_flags |= ErrorFlags::DataLength;
                 Value::Unhandled(data.into())
             }
             Err(_) => {
-                error_flags |= ErrorFlags::DATA_VALUE;
+                error_flags |= ErrorFlags::DataValue;
                 Value::Unhandled(data.into())
             }
         };
@@ -1260,12 +1269,6 @@ impl Message {
                 }
             }
         }
-    }
-}
-
-impl std::fmt::Display for ErrorFlags {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(fmt, "{:?}", self)
     }
 }
 
@@ -1820,13 +1823,13 @@ impl StreamWriter for EapAkaTypeData {
     }
 }
 
-fn parse_avps(input: &[u8]) -> IResult<&[u8], (Vec<AVP>, ErrorFlags)> {
+fn parse_avps(input: &[u8]) -> IResult<&[u8], (Vec<AVP>, Flags<ErrorFlags>)> {
     let (rest, avps_flags) = many0(combinator::complete(AVP::parse))(input)?;
     if !rest.is_empty() {
         // many0 will stop if sub-parser fails, but should read all
         Err(nom::Err::Error(NomError::new(input, ErrorKind::Many0)))
     } else {
-        let mut error_flags = ErrorFlags::NONE;
+        let mut error_flags = ErrorFlags::none();
         let mut avps = Vec::new();
         for (avp, flag) in avps_flags {
             error_flags |= flag;
@@ -1843,7 +1846,7 @@ impl<'a> Parse<'a> for Diameter {
         input: &'a [u8],
         _direction: Direction,
     ) -> Result<(&'a [u8], Option<Self::Message>)> {
-        let mut error_flags = ErrorFlags::NONE;
+        let mut error_flags = ErrorFlags::none();
         let (input, (header, flags)) = Header::parse(input)?;
         error_flags |= flags;
 
@@ -1973,7 +1976,7 @@ mod tests {
     hop_id: 0x53ca_fe6a,
     end_id: 0x7dc0_a11b,
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     ),
     case::reserved_set(
@@ -2004,7 +2007,7 @@ mod tests {
     hop_id: 0x53ca_fe6a,
     end_id: 0x7dc0_a11b,
     },
-    ErrorFlags::NON_ZERO_RESERVED,
+                ErrorFlags::NonZeroReserved.into(),
     )))
     ),
     case::diagnostic(
@@ -2027,9 +2030,8 @@ mod tests {
     Err(nom::Err::Incomplete(nom::Needed::new(4)))
     ),
     )]
-    fn test_header(input: &[u8], expected: IResult<&[u8], (Header, ErrorFlags)>) {
-        let h = Header::parse(input);
-        assert_eq!(h, expected);
+    fn test_header(input: &[u8], expected: IResult<&[u8], (Header, Flags<ErrorFlags>)>) {
+        assert_eq!(Header::parse(input), expected);
     }
 
 
@@ -2474,6 +2476,8 @@ mod tests {
                 println!("Failed to parse message!");
             }
         }
+    fn test_header(input: &[u8], expected: IResult<&[u8], (Header, Flags<ErrorFlags>)>) {
+        assert_eq!(Header::parse(input), expected);
     }
 
     #[rstest(
@@ -2508,7 +2512,7 @@ mod tests {
     value: Value::DiameterIdentity("backend.eap.testbed.aaa".into()),
     padding: vec ! [0x00],
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     ),
     case::diagnostic_vendor_id(
@@ -2537,7 +2541,7 @@ mod tests {
     value: Value::DiameterIdentity("".into()),
     padding: Vec::new(),
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     ),
     case::unsigned_32_format_ef(
@@ -2568,7 +2572,7 @@ mod tests {
     value: Value::Unsigned32(123),
     padding: vec ! [0x00, 0x00, 0x00],
     },
-    ErrorFlags::DATA_LENGTH,
+                ErrorFlags::DataLength.into(),
     )))
     ),
     case::unsigned_32_format(
@@ -2627,7 +2631,7 @@ mod tests {
     value: Value::Unsigned64(528_297_886_211),
     padding: Vec::new(),
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     ),
     case::enumerated_format(
@@ -2655,7 +2659,7 @@ mod tests {
     value: Value::Enumerated(2),
     padding: Vec::new(),
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     ),
     case::octet_string_format(
@@ -2686,7 +2690,7 @@ mod tests {
     value: Value::OctetString(vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]),
     padding: vec ! [0xef],
     },
-    ErrorFlags::NON_ZERO_PADDING,
+                ErrorFlags::NonZeroPadding.into(),
     )))
     ),
     case::utf8_string_format(
@@ -2716,7 +2720,7 @@ mod tests {
     value: Value::UTF8String("Hello World!".into()),
     padding: Vec::new(),
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     ),
     case::diameter_uri_format(
@@ -2748,7 +2752,7 @@ mod tests {
     value: Value::DiameterURI("example.com".into()),
     padding: vec ! [0x00],
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     ),
     case::address_v4_format(
@@ -2776,7 +2780,7 @@ mod tests {
     value: Value::Address(IpAddr::V4(Ipv4Addr::new(10, 10, 0, 1))),
     padding: Vec::new(),
     },
-    ErrorFlags::NON_ZERO_RESERVED,
+                ErrorFlags::NonZeroReserved.into(),
     )))
     ),
     case::address_v6_format(
@@ -2809,7 +2813,7 @@ mod tests {
     0x0000, 0x8a2e, 0x0370, 0x7334))),
     padding: Vec::new(),
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     ),
     case::time_format(
@@ -2837,7 +2841,7 @@ mod tests {
     value: Value::Time(3_794_601_600),
     padding: Vec::new(),
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     ),
     case::grouped_format_ef(
@@ -2915,7 +2919,7 @@ mod tests {
     }]),
     padding: Vec::new(),
     },
-    ErrorFlags::NON_ZERO_PADDING | ErrorFlags::NON_ZERO_RESERVED
+                ErrorFlags::NonZeroPadding | ErrorFlags::NonZeroReserved
     )))
     ),
     case::grouped_format(
@@ -3021,7 +3025,7 @@ mod tests {
     value: Value::Unhandled(vec ! [0xfe, 0xfe, 0xff, 0xff]),
     padding: Vec::new(),
     },
-    ErrorFlags::DATA_VALUE,
+                ErrorFlags::DataValue.into(),
     )))
     ),
     case::invalid_address(
@@ -3051,7 +3055,7 @@ mod tests {
     value: Value::Unhandled(vec ! [0x0a, 0x0a, 0x00, 0x01, 0x01]),
     padding: vec ! [0x00, 0x00, 0x00],
     },
-    ErrorFlags::DATA_LENGTH,
+                ErrorFlags::DataLength.into(),
     )))
     ),
     case::unhandled(
@@ -3081,7 +3085,7 @@ mod tests {
     value: Value::Unhandled(vec ! [0x0a, 0x0a, 0x00, 0x01, 0x01]),
     padding: vec ! [0x00, 0x00, 0x00],
     },
-    ErrorFlags::NONE,
+                ErrorFlags::none(),
     )))
     )
     )]
@@ -3108,6 +3112,10 @@ mod tests {
 
             Err(_) => {}
         }
+    }
+
+    fn test_avp2(input: &[u8], expected: IResult<&[u8], (AVP, Flags<ErrorFlags>)>) {
+        assert_eq!(AVP::parse(input), expected);
     }
 
     #[rstest(
@@ -3143,7 +3151,7 @@ mod tests {
     end_id: 0x7dc0_a11b,
     },
     avps: Vec::new(),
-    error_flags: ErrorFlags::NONE,
+                    error_flags: ErrorFlags::none(),
     })
     ))
     ),
@@ -3226,7 +3234,7 @@ mod tests {
     padding: Vec::new(),
     },
     ],
-    error_flags: ErrorFlags::NON_ZERO_RESERVED | ErrorFlags::NON_ZERO_PADDING,
+                error_flags : ErrorFlags::NonZeroReserved | ErrorFlags::NonZeroPadding,
     })
     ))),
     case::incomplete(

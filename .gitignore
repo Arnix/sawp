@@ -11,4 +11,5 @@ modules.xml
 google-java-format.xml
 vcs.xml
 .idea
-target/
+target
+cobertura.xml

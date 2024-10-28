@@ -1,11 +1,11 @@
 [package]
 name = "sawp-flags"
-version = "0.12.1"
+version = "0.13.1"
 authors = ["Canadian Centre for Cyber Security <sa-sawp@cyber.gc.ca>"]
 description = "SAWP BitFlags Handling and Storage"
 readme = "../README.md"
 edition = "2021"
-license-file = "../LICENSE"
+license = "MIT"
 repository = "https://github.com/CybercentreCanada/sawp"
 homepage = "https://github.com/CybercentreCanada/sawp"
 keywords = ["bitflags", "bit", "flags", "bitmask"]
@@ -17,7 +17,7 @@ include = [
 ]
 
 [dependencies]
-sawp-flags-derive = { path = "../sawp-flags-derive", version = "^0.12.1" }
+sawp-flags-derive = { path = "../sawp-flags-derive", version = "^0.13.1" }
 
 # Override default replacements
 [package.metadata.release]

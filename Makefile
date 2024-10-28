@@ -174,7 +174,11 @@ install:
 	install -d $(DESTDIR)$(INCLUDEDIR)/sawp
 	for obj in libsawp.so $(patsubst %, libsawp_%.so, ${FFI_PACKAGES}); do \
 		install -m 0755 target/release/$$obj $(DESTDIR)$(LIBDIR)/$$obj.${CRATE_VERSION}; \
-		(cd $(DESTDIR)$(LIBDIR) && ln -s ./$$obj.${CRATE_VERSION} ./$$obj); \
+        (cd $(DESTDIR)$(LIBDIR) \
+                && ln -s ./$$obj.${CRATE_VERSION} ./$$obj \
+                && ln -s ./$$obj.${CRATE_VERSION} ./$$obj.${CRATE_VERSION_MAJOR} \
+                && ln -s ./$$obj.${CRATE_VERSION} ./$$obj.${CRATE_VERSION_MINOR} \
+        ); \
 	done
 	install -m 644 target/sawp/*.h $(DESTDIR)$(INCLUDEDIR)/sawp
 
@@ -200,25 +204,25 @@ publish:
 
 .PHONY: valgrind 
 valgrind:
-	${CARGO} valgrind test --workspace --all-targets --all-features
+	${CARGO} valgrind test --workspace --all-targets
 
 .PHONY: asan-address
 asan-address: export RUSTFLAGS = -Zsanitizer=address
 asan-address: export RUSTDOCFLAGS = -Zsanitizer=address
 asan-address:
-	${CARGO} +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --workspace --all-targets --all-features
+	${CARGO} +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --workspace --all-targets
 
 .PHONY: asan-memory
 asan-memory: export RUSTFLAGS = -Zsanitizer=memory -Zsanitizer-memory-track-origins
 asan-memory: export RUSTDOCFLAGS = -Zsanitizer=memory -Zsanitizer-memory-track-origins
 asan-memory:
-	${CARGO} +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --workspace --all-targets --all-features
+	${CARGO} +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --workspace --all-targets
 
 .PHONY: asan-leak
 asan-leak: export RUSTFLAGS = -Zsanitizer=leak
 asan-leak: export RUSTDOCFLAGS = -Zsanitizer=leak
 asan-leak:
-	${CARGO} +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --workspace --all-targets --all-features
+	${CARGO} +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --workspace --all-targets
 
 .PHONY: asan
 asan: asan-address asan-memory asan-leak

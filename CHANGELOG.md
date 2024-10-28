@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+## [0.13.1] - 2024-10-02
+### Changed
+- sawp-modbus: Make length field of Message public
+
+### Fixed
+- sawp-resp: Fix crash with negative length arrays triggering a massive memory allocation
+- sawp-resp: Override Probe to reject when Invalid is the only message. The default implementation caused all data to always be interpreted as RESP.
+- sawp-error: Fix cfg lines to correctly use feature name
+
+## [0.13.0] - 2024-07-08
+### Changed
+- sawp: increased MSRV to 1.63.0
+- sawp: Remove Cargo.toml deps which served to pin MSRV compatible transitive dependencies
+- sawp: derive Eq where PartialEq is already derived and Eq could be derived (applied from clippy lint)
+- sawp: Include Cargo.lock to help deliver on our MSRV promise
+- sawp-file: Update to rmp-serde 1.1.1
+- sawp: Applied clippy lints
+- sawp-diameter: error flags now use sawp\_flags, changing from a struct to an enum.
+
+### Fixed
+- sawp: Fix release pipeline to verify MSRV, not stable
+
 ## [0.12.1] - 2023-04-12
 ### Fixed
 - sawp-ike: Restricted lengths for attribute parsing to prevent buffer over-reads
@@ -150,7 +172,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - sawp-modbus: FFI support.
 
 <!-- next-url -->
-[Unreleased]: https://github.com/CybercentreCanada/sawp/compare/sawp-0.12.1...HEAD
+[Unreleased]: https://github.com/CybercentreCanada/sawp/compare/sawp-0.13.1...HEAD
+[0.13.1]: https://github.com/CybercentreCanada/sawp/releases/tag/sawp-0.13.1
+[0.13.0]: https://github.com/CybercentreCanada/sawp/releases/tag/sawp-0.13.0
 [0.12.1]: https://github.com/CybercentreCanada/sawp/releases/tag/sawp-0.12.1
 [0.12.0]: https://github.com/CybercentreCanada/sawp/releases/tag/sawp-0.12.0
 [0.11.1]: https://github.com/CybercentreCanada/sawp/releases/tag/sawp-0.11.1

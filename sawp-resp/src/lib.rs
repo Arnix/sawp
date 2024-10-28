@@ -43,7 +43,7 @@
 
 use sawp::error::Result;
 use sawp::parser::{Direction, Parse};
-use sawp::probe::Probe;
+use sawp::probe::{Probe, Status};
 use sawp::protocol::Protocol;
 use sawp_flags::{BitFlags, Flag, Flags};
 
@@ -71,7 +71,7 @@ pub const MAX_BULK_STRING_LEN: usize = 1024 * 512;
 
 /// Error flags raised while parsing RESP - to be used in the returned Message
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, BitFlags)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, BitFlags)]
 pub enum ErrorFlags {
     /// Malformed data including invalid type tokens, invalid integers,
     /// or improperly formatted RESP has been parsed.
@@ -85,7 +85,7 @@ pub enum ErrorFlags {
 }
 
 /// RESP signals data types by prepending these one-character tokens
-#[derive(Clone, Copy, Debug, PartialEq, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum DataTypeToken {
     /// A single binary-safe string up to 512 MB in length. Precedes a CRLF-terminated length describing the following
@@ -117,7 +117,7 @@ impl DataTypeToken {
 /// Entry types to return in the parsed message
 #[cfg_attr(feature = "ffi", derive(GenerateFFI))]
 #[cfg_attr(feature = "ffi", sawp_ffi(prefix = "sawp_resp"))]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Entry {
     /// Arrays of entries
     Array(Vec<Entry>),
@@ -149,7 +149,7 @@ pub enum StringResult<'a> {
 /// Breakdown of the parsed resp bytes
 #[cfg_attr(feature = "ffi", derive(GenerateFFI))]
 #[cfg_attr(feature = "ffi", sawp_ffi(prefix = "sawp_resp"))]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Message {
     pub entry: Entry,
     #[cfg_attr(feature = "ffi", sawp_ffi(flag = "u8"))]
@@ -169,7 +169,29 @@ impl<'a> Protocol<'a> for Resp {
     }
 }
 
-impl<'a> Probe<'a> for Resp {}
+impl<'a> Probe<'a> for Resp {
+    /// Probes the input to recognize if the underlying bytes likely match this
+    /// protocol.
+    ///
+    /// Returns a probe status. Probe again once more data is available when the
+    /// status is `Status::Incomplete`.
+    fn probe(&self, input: &'a [u8], direction: Direction) -> Status {
+        match self.parse(input, direction) {
+            Ok((
+                _,
+                Some(Message {
+                    entry: Entry::Invalid(_),
+                    error_flags: _,
+                }),
+            )) => Status::Unrecognized, // If the only message is Invalid it is probably not RESP
+            Ok(_) => Status::Recognized,
+            Err(sawp::error::Error {
+                kind: sawp::error::ErrorKind::Incomplete(_),
+            }) => Status::Incomplete,
+            Err(_) => Status::Unrecognized,
+        }
+    }
+}
 
 impl Resp {
     fn advance_if_crlf(input: &[u8]) -> &[u8] {
@@ -225,6 +247,7 @@ impl Resp {
                     if length == -1 {
                         return Ok((Resp::advance_if_crlf(rem), StringResult::Nil, error_flags));
                     }
+                    error_flags |= ErrorFlags::InvalidData;
                     Ok((
                         Resp::advance_if_crlf(rem),
                         StringResult::String(b""),
@@ -266,7 +289,7 @@ impl Resp {
                 if array_depth < MAX_ARRAY_DEPTH {
                     let (mut local_input, length, mut error_flags) = Resp::parse_integer(input)?;
                     match length {
-                        IntegerResult::Integer(length) => {
+                        IntegerResult::Integer(length) if length >= 0 => {
                             let mut entries: Vec<Entry> = Vec::with_capacity(length as usize);
 
                             for _ in 0..length {
@@ -280,6 +303,15 @@ impl Resp {
                                 local_input = rem;
                             }
                             Ok((local_input, Entry::Array(entries), error_flags))
+                        }
+                        IntegerResult::Integer(-1) => Ok((local_input, Entry::Nil, error_flags)),
+                        IntegerResult::Integer(_length) => {
+                            error_flags |= ErrorFlags::InvalidData;
+                            Ok((
+                                Resp::advance_if_crlf(local_input),
+                                Entry::Array(vec![]),
+                                error_flags,
+                            ))
                         }
                         IntegerResult::Data(invalid_length) => Ok((
                             Resp::advance_if_crlf(local_input),
@@ -424,6 +456,30 @@ mod test {
             )
         ))
     ),
+    case::parse_null_value_array(
+        b"*-1\r\n",
+        Ok((
+            0,
+            Some(
+                Message {
+                    entry: Entry::Nil,
+                    error_flags: ErrorFlags::none(),
+                }
+            )
+        ))
+    ),
+    case::invalid_negative_array_length(
+        b"*-2\r\n",
+        Ok((
+            0,
+            Some(
+                Message {
+                    entry: Entry::Array(vec![]),
+                    error_flags: ErrorFlags::InvalidData.into(),
+                }
+            )
+        ))
+    ),
     case::parse_nested_array(
         b"*1\r\n*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n",
         Ok((
@@ -490,7 +546,7 @@ mod test {
         )
         ))
     ),
-    case::parse_null_value(
+    case::parse_null_value_string(
         b"$-1\r\n",
         Ok((
             0,
@@ -498,6 +554,18 @@ mod test {
                 Message {
                     entry: Entry::Nil,
                     error_flags: ErrorFlags::none(),
+                }
+            )
+        ))
+    ),
+    case::invalid_negative_bulk_string_length(
+        b"$-2\r\n",
+        Ok((
+            0,
+            Some(
+                Message {
+                    entry: Entry::String(b"".to_vec()),
+                    error_flags: ErrorFlags::InvalidData.into(),
                 }
             )
         ))

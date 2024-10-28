@@ -1,11 +1,11 @@
 [package]
 name = "sawp-diameter"
-version = "0.12.1"
+version = "0.13.1"
 authors = ["Canadian Centre for Cyber Security <sa-sawp@cyber.gc.ca>"]
 description = "SAWP Protocol Parser for Diameter"
 readme = "../README.md"
 edition = "2021"
-license-file = "../LICENSE"
+license = "MIT"
 repository = "https://github.com/CybercentreCanada/sawp"
 homepage = "https://github.com/CybercentreCanada/sawp"
 keywords = ["diameter", "parser", "protocol", "mobility", "core-network"]
@@ -21,6 +21,10 @@ include = [
 verbose = ["sawp/verbose"]
 
 [dependencies]
+sawp = { path = "..", version = "^0.13.1" }
+sawp-flags = { path = "../sawp-flags", version = "^0.13.1" }
+nom = "7.1.1"
+num_enum = "0.5.1"
 sawp = { path = "..", version = "^0.12.1" }
 nom = "7.1.3"
 num_enum = "0.7.0"

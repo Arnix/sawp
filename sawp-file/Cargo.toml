@@ -1,11 +1,11 @@
 [package]
 name = "sawp-file"
-version = "0.12.1"
+version = "0.13.1"
 authors = ["Canadian Centre for Cyber Security <sa-sawp@cyber.gc.ca>"]
 description = "SAWP File Format"
 readme = "../README.md"
 edition = "2021"
-license-file = "../LICENSE"
+license = "MIT"
 repository = "https://github.com/CybercentreCanada/sawp"
 homepage = "https://github.com/CybercentreCanada/sawp"
 keywords = ["parser", "protocols", "serialization"]
@@ -18,8 +18,8 @@ include = [
 ]
 
 [dependencies]
-sawp = { path = "..", version = "^0.12.1" }
-rmp-serde = "0.14.4"
+sawp = { path = "..", version = "^0.13.1" }
+rmp-serde = "1.1.1"
 serde = "1.0.116"
 serde_derive = "1.0.116"
 
