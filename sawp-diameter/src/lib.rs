@@ -6,14 +6,14 @@
 
 // #[macro_use]
 //extern crate num_derive;
-
-use std::collections::HashSet;
 use sawp::error::{Error, NomError, Result};
 use sawp::parser::{Direction, Parse};
 use sawp::probe::Probe;
 use sawp::protocol::Protocol;
 use sawp_flags::{BitFlags, Flag, Flags};
+use std::collections::HashSet;
 
+use bytestream::ByteOrder::BigEndian;
 use nom::bytes::streaming::tag;
 use nom::bytes::streaming::take;
 use nom::combinator;
@@ -22,22 +22,20 @@ use nom::multi::many0;
 use nom::number::streaming::{be_u16, be_u24, be_u32, be_u64, be_u8};
 use nom::IResult;
 use rand::SeedableRng;
-use bytestream::ByteOrder::BigEndian;
 
 use bytestream::*;
 use std::io::*;
 
-use bitflags::bitflags;
+use lazy_static::lazy_static;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use rand::Rng;
+use rand_chacha::ChaCha8Rng;
 use sawp::error::ErrorKind::InvalidData;
 use std::convert::TryFrom;
 use std::mem::size_of_val;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
-use lazy_static::lazy_static;
 use EapAkaAttributeTypeCode::*;
-use rand::{Rng};
-use rand_chacha::ChaCha8Rng;
 
 lazy_static! {
     static ref RANDOM: Mutex<ChaCha8Rng> = Mutex::new(ChaCha8Rng::from_entropy());
@@ -141,7 +139,7 @@ pub const DIAMETER_NO_COMMON_SECURITY: u32 = 5017;
 // | 8388622    3GPP-LCS-Routing-Info-Request           RIR      3GPP TS.29.173 |
 // | 8388622    3GPP-LCS-Routing-Info-Answer            RIA      3GPP TS.29.173 |
 
-#[derive(Debug, PartialEq, Clone, Copy, TryFromPrimitive, IntoPrimitive)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, TryFromPrimitive, IntoPrimitive)]
 #[repr(u32)]
 pub enum CommandCode {
     CapabilitiesExchange = 257,
@@ -174,7 +172,7 @@ pub enum CommandCode {
     Unknown,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct Command {
     raw: u32,
     pub code: CommandCode,
@@ -208,11 +206,9 @@ impl StreamWriter for Command {
 // 8 + 24 + 8 + 24 + 32 + 32 + 32 bits
 #[derive(Debug, PartialEq, Eq)]
 pub struct Header {
-    version: u8,
-    // actually 24 bites on wire
+    version: u8, // actually 24 bites on wire
     length: u32,
-    pub flags: u8,
-    // actually 24 bits on wire
+    pub flags: u8, // actually 24 bits on wire
     code: Command,
     app_id: u32,
     hop_id: u32,
@@ -220,7 +216,7 @@ pub struct Header {
 }
 
 impl Header {
-    pub fn new(length : u32, flags : u8, code : Command, app_id : u32, hop_id : u32) -> Self {
+    pub fn new(length: u32, flags: u8, code: Command, app_id: u32, hop_id: u32) -> Self {
         Self {
             version: 0x1,
             length,
@@ -240,7 +236,7 @@ impl Header {
         self.hop_id
     }
 
-    pub fn set_hop_id(&mut self, hop_id : u32) {
+    pub fn set_hop_id(&mut self, hop_id: u32) {
         self.hop_id = hop_id;
     }
 
@@ -402,7 +398,7 @@ impl Value {
         }
     }
 
-    pub fn new<'a>(code: &AttributeCode, data: &'a [u8]) -> IResult<&'a [u8], (Self, ErrorFlags)> {
+    pub fn new<'a>(code: &AttributeCode, data: &'a [u8]) -> IResult<&'a [u8], (Self, Flags<ErrorFlags>)> {
         match code {
             AttributeCode::AcctSessionId | AttributeCode::ProxyState => {
                 Ok((&[], (Value::OctetString(data.into()), ErrorFlags::none())))
@@ -428,7 +424,7 @@ impl Value {
                             payload_type: EapPayloadType::new(raw_type),
                             type_data: TypeData::None,
                         };
-                        Ok((&[], (Value::Eap(eap_payload), ErrorFlags::NONE)))
+                        Ok((&[], (Value::Eap(eap_payload), ErrorFlags::none())))
                     }
                     EapPayloadTypeCode::Identity => match String::from_utf8(data.to_vec()) {
                         Ok(id) => {
@@ -439,10 +435,10 @@ impl Value {
                                 payload_type: EapPayloadType::new(raw_type),
                                 type_data: TypeData::Identity(id),
                             };
-                            Ok((&[], (Value::Eap(eap_payload), ErrorFlags::NONE)))
+                            Ok((&[], (Value::Eap(eap_payload), ErrorFlags::none())))
                         }
                         Err(_) => {
-                            Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::DATA_VALUE)))
+                            Ok((&[], (Value::Unhandled(data.into()), Flags::from_flag(ErrorFlags::DataValue))))
                         }
                     },
                     EapPayloadTypeCode::Aka => {
@@ -451,12 +447,12 @@ impl Value {
                         ) {
                             Ok(eap_payload) => Ok(eap_payload),
                             Err(_) => {
-                                Ok((&[], (Value::Unhandled(data.into()), ErrorFlags::DATA_VALUE)))
+                                Ok((&[], (Value::Unhandled(data.into()), Flags::from_flag(ErrorFlags::DataValue))))
                             }
                         };
                     }
                     EapPayloadTypeCode::Unknown => {
-                        Ok((&[], (Value::OctetString(data.into()), ErrorFlags::NONE)))
+                        Ok((&[], (Value::OctetString(data.into()), ErrorFlags::none())))
                     }
                 }
             }
@@ -579,12 +575,12 @@ impl Value {
         length: u16,
         raw_type: u8,
         data: &[u8],
-    ) -> Result<(&[u8], (Value, ErrorFlags))> {
+    ) -> Result<(&[u8], (Value, Flags<ErrorFlags>))> {
         let (data, raw_sub_type) = be_u8(data)?;
         let (data, reserved) = be_u16(data)?;
         let sub_type = EapAkaSubType::new(raw_sub_type);
 
-        let mut error_flags = ErrorFlags::NONE;
+        let mut error_flags = ErrorFlags::none();
         let mut attributes = Vec::new();
         let (rest, attrs) = many0(combinator::complete(EapAkaAttribute::parse))(data)?;
 
@@ -1169,11 +1165,11 @@ impl StreamWriter for AVP {
 }
 
 impl Message {
-    pub fn new(header : Header, avps: Vec<AVP>) -> std::result::Result<Message, TypeError> {
+    pub fn new(header: Header, avps: Vec<AVP>) -> std::result::Result<Message, TypeError> {
         Ok(Self {
             header,
             avps,
-            error_flags: ErrorFlags::NONE,
+            error_flags: ErrorFlags::none(),
         })
     }
 
@@ -1191,7 +1187,7 @@ impl Message {
                 hop_id,
             ),
             avps,
-            error_flags: ErrorFlags::NONE,
+            error_flags: ErrorFlags::none(),
         })
     }
 
@@ -1212,7 +1208,7 @@ impl Message {
         Ok(Message {
             header: message.header.response(Header::SIZE as u32 + length),
             avps: all_avps,
-            error_flags: ErrorFlags::NONE,
+            error_flags: ErrorFlags::none(),
         })
     }
 
@@ -1229,7 +1225,7 @@ impl Message {
         Message::avp_by_code_f(&self.avps, code)
     }
 
-    pub fn avp_by_code_f<'a>(avps : &'a Vec<AVP>, code: AttributeCode) -> Option<&'a AVP> {
+    pub fn avp_by_code_f<'a>(avps: &'a Vec<AVP>, code: AttributeCode) -> Option<&'a AVP> {
         avps.iter().filter(|avp| { avp.attribute.code == code }).collect::<Vec<&AVP>>().get(0).copied()
     }
 
@@ -1256,15 +1252,15 @@ impl Message {
         src_message.avp_by_code(AttributeCode::ProxyInfo).map(|avp| avps.push(avp.clone()));
     }
 
-    pub fn result_code_matches(&self, candidates : Vec<u32>) -> bool {
-        let set : HashSet<u32> = HashSet::from_iter(candidates);
+    pub fn result_code_matches(&self, candidates: Vec<u32>) -> bool {
+        let set: HashSet<u32> = HashSet::from_iter(candidates);
         match self.avp_by_code(AttributeCode::ResultCode) {
             None => false,
             Some(rc) => {
                 match rc.value {
                     Value::Unsigned32(rc) => {
                         return set.contains(&rc)
-                    },
+                    }
                     _ => false
                 }
             }
@@ -1666,14 +1662,14 @@ impl EapAkaAttribute {
         }
     }
     // Must go through these and fix up, write unit tests
-    fn parse(input: &[u8]) -> IResult<&[u8], (Self, ErrorFlags)> {
+    fn parse(input: &[u8]) -> IResult<&[u8], (Self, Flags<ErrorFlags>)> {
         let (input, raw_eap_aka_att_type) = be_u8(input)?;
         let attribute_type = EapAkaAttributeType::new(raw_eap_aka_att_type);
         let (input, length) = be_u8(input)?;
         let mut remaining: &[u8] = &[];
 
         let value: EapAkaAttributeValue = match attribute_type.code {
-            AtPermanentIdReq | AtAnyIdReq | AtFullAuthIdReq  | AtResultInd | AtCounterTooSmall => {
+            AtPermanentIdReq | AtAnyIdReq | AtFullAuthIdReq | AtResultInd | AtCounterTooSmall => {
                 assert_eq!(length, 1);
                 EapAkaAttributeValue::NoValue
             }
@@ -1690,7 +1686,7 @@ impl EapAkaAttribute {
                     }
                 }
             }
-            AtRand | AtAutn | AtMac | AtIv | AtNonceS  => {
+            AtRand | AtAutn | AtMac | AtIv | AtNonceS => {
                 let (input, reserved) = be_u16(input)?;
                 let (input, val) = take(16usize)(input)?;
                 // debug_assert_eq!(input.len(), 0);
@@ -1735,7 +1731,7 @@ impl EapAkaAttribute {
                     length,
                     value,
                 },
-                ErrorFlags::NONE,
+                ErrorFlags::none(),
             ),
         ))
     }
@@ -1881,8 +1877,9 @@ impl<'a> Probe<'a> for Diameter {}
 mod tests {
     use super::*;
     use bytestream::ByteOrder::BigEndian;
-    use rstest::rstest;
+    use rstest::*;
     use sawp::probe::Status;
+
 
     #[test]
     fn foo() {
@@ -1899,7 +1896,7 @@ mod tests {
 
     #[test]
     fn test_h() {
-        let input  = &[1, 0, 0, 172, 128, 0, 1, 1, 0, 0, 0, 0, 0, 0, 18, 52, 0, 0, 35, 69];
+        let input = &[1, 0, 0, 172, 128, 0, 1, 1, 0, 0, 0, 0, 0, 0, 18, 52, 0, 0, 35, 69];
 
         let h = Header::parse(input);
         println!("{:?}", h)
@@ -1911,124 +1908,125 @@ mod tests {
     }
 
     #[rstest(
-    input,
-    expected,
-    case::empty(b"", Err(nom::Err::Incomplete(nom::Needed::new(1)))),
-    case::hello_world(b"hello world", Err(nom::Err::Error(NomError::new(b"hello world" as & [u8], ErrorKind::Tag)))),
-    case::invalid_length(
-    & [
-    // Version: 1
-    0x01,
-    // Length: 12
-    0x00, 0x00, 0x0c,
-    // Flags: 128 (Request)
-    0x80,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
-    ],
-    Err(nom::Err::Error(NomError::new(
-    & [
-    // Flags: 128 (Request)
-    0x80_u8,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
-    ] as & [u8],
-    ErrorKind::LengthValue))
-    )
-    ),
-    case::diagnostic(
-    & [
-    // Version: 1
-    0x01,
-    // Length: 20
-    0x00, 0x00, 0x14,
-    // Flags: 128 (Request)
-    0x80,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
-    ],
-    Ok((& [] as & [u8],
-    (
-    Header {
-    version: 1,
-    length: 20,
-    flags: 128,
-    code: Command::new(257),
-    app_id: 0,
-    hop_id: 0x53ca_fe6a,
-    end_id: 0x7dc0_a11b,
-    },
-                ErrorFlags::none(),
-    )))
-    ),
-    case::reserved_set(
-    & [
-    // Version: 1
-    0x01,
-    // Length: 20
-    0x00, 0x00, 0x14,
-    // Flags: 128 (Request)
-    0x0f,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
-    ],
-    Ok((& [] as & [u8],
-    (
-    Header {
-    version: 1,
-    length: 20,
-    flags: 15,
-    code: Command::new(257),
-    app_id: 0,
-    hop_id: 0x53ca_fe6a,
-    end_id: 0x7dc0_a11b,
-    },
-                ErrorFlags::NonZeroReserved.into(),
-    )))
-    ),
-    case::diagnostic(
-    & [
-    // Version: 1
-    0x01,
-    // Length: 24
-    0x00, 0x00, 0x18,
-    // Flags: 128 (Request)
-    0x80,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
-    ],
-    Err(nom::Err::Incomplete(nom::Needed::new(4)))
-    ),
+        input,
+        expected,
+        case::empty(b"", Err(nom::Err::Incomplete(nom::Needed::new(1)))),
+        case::hello_world(b"hello world", Err(nom::Err::Error(NomError::new(b"hello world" as & [u8], ErrorKind::Tag
+        )))),
+        case::invalid_length(
+            & [
+            // Version: 1
+            0x01,
+            // Length: 12
+            0x00, 0x00, 0x0c,
+            // Flags: 128 (Request)
+            0x80,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
+            ],
+            Err(nom::Err::Error(NomError::new(
+            & [
+            // Flags: 128 (Request)
+            0x80_u8,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
+            ] as & [u8],
+            ErrorKind::LengthValue))
+            )
+        ),
+        case::diagnostic(
+            & [
+            // Version: 1
+            0x01,
+            // Length: 20
+            0x00, 0x00, 0x14,
+            // Flags: 128 (Request)
+            0x80,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
+            ],
+            Ok((& [] as & [u8],
+            (
+            Header {
+            version: 1,
+            length: 20,
+            flags: 128,
+            code: Command::new(257),
+            app_id: 0,
+            hop_id: 0x53ca_fe6a,
+            end_id: 0x7dc0_a11b,
+            },
+                        ErrorFlags::none(),
+            )))
+        ),
+        case::reserved_set(
+            & [
+            // Version: 1
+            0x01,
+            // Length: 20
+            0x00, 0x00, 0x14,
+            // Flags: 128 (Request)
+            0x0f,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
+            ],
+            Ok((& [] as & [u8],
+            (
+            Header {
+            version: 1,
+            length: 20,
+            flags: 15,
+            code: Command::new(257),
+            app_id: 0,
+            hop_id: 0x53ca_fe6a,
+            end_id: 0x7dc0_a11b,
+            },
+                        ErrorFlags::NonZeroReserved.into(),
+            )))
+        ),
+        case::diagnostic(
+            & [
+            // Version: 1
+            0x01,
+            // Length: 24
+            0x00, 0x00, 0x18,
+            // Flags: 128 (Request)
+            0x80,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
+            ],
+            Err(nom::Err::Incomplete(nom::Needed::new(4)))
+        ),
     )]
     fn test_header(input: &[u8], expected: IResult<&[u8], (Header, Flags<ErrorFlags>)>) {
         assert_eq!(Header::parse(input), expected);
@@ -2148,79 +2146,79 @@ mod tests {
     }
 
     #[rstest(
-    input,
-    expected,
-    case::empty(b"", Err(nom::Err::Incomplete(nom::Needed::new(1)))),
-    case::atrand(
-    & [
-    0x01, 0x05, 0x00, 0x00, 0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x72, 0x61, 0x6e, 0x64, 0x6f, 0x6d, 0x2e, 0x2e,
-    ],
-    Ok((& [] as & [u8],
-    (
-    EapAkaAttribute {
-    attribute_type: EapAkaAttributeType {
-    raw: 1,
-    code: AtRand,
-    },
-    length: 5,
-    value: EapAkaAttributeValue::AtVecValue(0x00, vec ! [0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x72, 0x61, 0x6e, 0x64, 0x6f, 0x6d, 0x2e, 0x2e, ]),
-    },
-    ErrorFlags::NONE,
-    )))
-    ),
-    case::atres(
-    & [
-    0x03, 0x05, 0x00, 0x80, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
-    ],
-    Ok((& [] as & [u8],
-    (
-    EapAkaAttribute {
-    attribute_type: EapAkaAttributeType {
-    raw: 3,
-    code: AtRes,
-    },
-    length: 5,
-    value: EapAkaAttributeValue::AtVecValue(0x80, vec ! [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,]),
-    },
-    ErrorFlags::NONE,
-    )))
-    ),
-    case::atmac(
-    & [
-    0x0b, 0x05, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    ],
-    Ok((& [] as & [u8],
-    (
-    EapAkaAttribute {
-    attribute_type: EapAkaAttributeType {
-    raw: 0xb,
-    code: AtMac,
-    },
-    length: 0x5,
-    value: EapAkaAttributeValue::AtVecValue(0x00, vec ! [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, ]),
-    },
-    ErrorFlags::NONE,
-    )))
-    ),
-    case::atautn(
-    & [
-    0x02, 0x05, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-    ],
-    Ok((& [] as & [u8],
-    (
-    EapAkaAttribute {
-    attribute_type: EapAkaAttributeType {
-    raw: 0x02,
-    code: AtAutn,
-    },
-    length: 0x5,
-    value: EapAkaAttributeValue::AtVecValue(0x00, vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10]),
-    },
-    ErrorFlags::NONE,
-    )))
-    ),
+        input,
+        expected,
+        case::empty(b"", Err(nom::Err::Incomplete(nom::Needed::new(1)))),
+        case::atrand(
+            & [
+            0x01, 0x05, 0x00, 0x00, 0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x72, 0x61, 0x6e, 0x64, 0x6f, 0x6d, 0x2e, 0x2e,
+            ],
+            Ok((& [] as & [u8],
+            (
+            EapAkaAttribute {
+            attribute_type: EapAkaAttributeType {
+            raw: 1,
+            code: AtRand,
+            },
+            length: 5,
+            value: EapAkaAttributeValue::AtVecValue(0x00, vec ! [0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x72, 0x61, 0x6e, 0x64, 0x6f, 0x6d, 0x2e, 0x2e, ]),
+            },
+            ErrorFlags::none(),
+            )))
+        ),
+        case::atres(
+            & [
+            0x03, 0x05, 0x00, 0x80, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,
+            ],
+            Ok((& [] as & [u8],
+            (
+            EapAkaAttribute {
+            attribute_type: EapAkaAttributeType {
+            raw: 3,
+            code: AtRes,
+            },
+            length: 5,
+            value: EapAkaAttributeValue::AtVecValue(0x80, vec ! [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66,]),
+            },
+            ErrorFlags::none(),
+            )))
+        ),
+        case::atmac(
+            & [
+            0x0b, 0x05, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            ],
+            Ok((& [] as & [u8],
+            (
+            EapAkaAttribute {
+            attribute_type: EapAkaAttributeType {
+            raw: 0xb,
+            code: AtMac,
+            },
+            length: 0x5,
+            value: EapAkaAttributeValue::AtVecValue(0x00, vec ! [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, ]),
+            },
+            ErrorFlags::none(),
+            )))
+        ),
+        case::atautn(
+            & [
+            0x02, 0x05, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+            ],
+            Ok((& [] as & [u8],
+            (
+            EapAkaAttribute {
+            attribute_type: EapAkaAttributeType {
+            raw: 0x02,
+            code: AtAutn,
+            },
+            length: 0x5,
+            value: EapAkaAttributeValue::AtVecValue(0x00, vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10]),
+            },
+            ErrorFlags::none(),
+            )))
+        ),
     )]
-    fn decode_it(input: &[u8], expected: IResult<&[u8], (EapAkaAttribute, ErrorFlags)>) {
+    fn decode_it(input: &[u8], expected: IResult<&[u8], (EapAkaAttribute, Flags<ErrorFlags>)>) {
         let res = EapAkaAttribute::parse(input);
         assert_eq!(res, expected);
         match res {
@@ -2269,7 +2267,7 @@ mod tests {
                     hop_id: 0x53ca_fe6a,
                     end_id: 0x7dc0_a11b,
                 },
-                ErrorFlags::NON_ZERO_RESERVED,
+                Flags::from_flag(ErrorFlags::NonZeroReserved),
             ),
         ));
         let h = Header::parse(input);
@@ -2476,859 +2474,833 @@ mod tests {
                 println!("Failed to parse message!");
             }
         }
-    fn test_header(input: &[u8], expected: IResult<&[u8], (Header, Flags<ErrorFlags>)>) {
-        assert_eq!(Header::parse(input), expected);
     }
 
     #[rstest(
-    input,
-    expected,
-    case::empty(b"", Err(nom::Err::Incomplete(nom::Needed::new(4)))),
-    case::diagnostic(
-    & [
-    // Code: 264 (Origin-Host)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 40 (Mandatory)
-    0x40,
-    // Length: 31
-    0x00, 0x00, 0x1f,
-    // Data: "backend.eap.testbed.aaa"
-    0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2e,
-    0x65, 0x61, 0x70, 0x2e, 0x74, 0x65, 0x73, 0x74,
-    0x62, 0x65, 0x64, 0x2e, 0x61, 0x61, 0x61,
-    // Padding: 1
-    0x00,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 264,
-    code: AttributeCode::OriginHost,
-    },
-    flags: 0x40,
-    length: 31,
-    vendor_id: None,
-    value: Value::DiameterIdentity("backend.eap.testbed.aaa".into()),
-    padding: vec ! [0x00],
-    },
-                ErrorFlags::none(),
-    )))
-    ),
-    case::diagnostic_vendor_id(
-    & [
-    // Code: 264 (Origin-Host)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 0x80 (Vendor-Id)
-    0x80,
-    // Length: 12
-    0x00, 0x00, 0x0c,
-    // Vendor-Id: 1234567890
-    0x49, 0x96, 0x02, 0xd2,
-    // Data:
-    // Padding:
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 264,
-    code: AttributeCode::OriginHost,
-    },
-    flags: 0x80,
-    length: 12,
-    vendor_id: Some(1_234_567_890u32),
-    value: Value::DiameterIdentity("".into()),
-    padding: Vec::new(),
-    },
-                ErrorFlags::none(),
-    )))
-    ),
-    case::unsigned_32_format_ef(
-    & [
-    // Code: 266 (Vendor-Id)
-    0x00, 0x00, 0x01, 0x0a,
-    // Flags: 0x00
-    0x00,
-    // Length: 13,
-    0x00, 0x00, 0x0d,
-    // Vendor-Id:
-    // Data:
-    0x00, 0x00, 0x00, 0x7b,
-    0x01,
-    // Padding
-    0x00, 0x00, 0x00,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 266,
-    code: AttributeCode::VendorId,
-    },
-    flags: 0x00,
-    length: 13,
-    vendor_id: None,
-    value: Value::Unsigned32(123),
-    padding: vec ! [0x00, 0x00, 0x00],
-    },
-                ErrorFlags::DataLength.into(),
-    )))
-    ),
-    case::unsigned_32_format(
-    & [
-    // Code: 266 (Vendor-Id)
-    0x00, 0x00, 0x01, 0x0a,
-    // Flags: 0x00
-    0x00,
-    // Length: 12,
-    0x00, 0x00, 0x0c,
-    // Vendor-Id:
-    // Data:
-    0x00, 0x00, 0x00, 0x7b,
-    // Padding
+        input,
+        expected,
+        case::empty(b"", Err(nom::Err::Incomplete(nom::Needed::new(4)))),
+        case::diagnostic(
+            & [
+            // Code: 264 (Origin-Host)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 40 (Mandatory)
+            0x40,
+            // Length: 31
+            0x00, 0x00, 0x1f,
+            // Data: "backend.eap.testbed.aaa"
+            0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2e,
+            0x65, 0x61, 0x70, 0x2e, 0x74, 0x65, 0x73, 0x74,
+            0x62, 0x65, 0x64, 0x2e, 0x61, 0x61, 0x61,
+            // Padding: 1
+            0x00,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 264,
+            code: AttributeCode::OriginHost,
+            },
+            flags: 0x40,
+            length: 31,
+            vendor_id: None,
+            value: Value::DiameterIdentity("backend.eap.testbed.aaa".into()),
+            padding: vec ! [0x00],
+            },
+                        ErrorFlags::none(),
+            )))
+        ),
+        case::diagnostic_vendor_id(
+            & [
+            // Code: 264 (Origin-Host)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 0x80 (Vendor-Id)
+            0x80,
+            // Length: 12
+            0x00, 0x00, 0x0c,
+            // Vendor-Id: 1234567890
+            0x49, 0x96, 0x02, 0xd2,
+            // Data:
+            // Padding:
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 264,
+            code: AttributeCode::OriginHost,
+            },
+            flags: 0x80,
+            length: 12,
+            vendor_id: Some(1_234_567_890u32),
+            value: Value::DiameterIdentity("".into()),
+            padding: Vec::new(),
+            },
+                        ErrorFlags::none(),
+            )))
+        ),
+        case::unsigned_32_format_ef(
+            & [
+            // Code: 266 (Vendor-Id)
+            0x00, 0x00, 0x01, 0x0a,
+            // Flags: 0x00
+            0x00,
+            // Length: 13,
+            0x00, 0x00, 0x0d,
+            // Vendor-Id:
+            // Data:
+            0x00, 0x00, 0x00, 0x7b,
+            0x01,
+            // Padding
+            0x00, 0x00, 0x00,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 266,
+            code: AttributeCode::VendorId,
+            },
+            flags: 0x00,
+            length: 13,
+            vendor_id: None,
+            value: Value::Unsigned32(123),
+            padding: vec ! [0x00, 0x00, 0x00],
+            },
+                        ErrorFlags::DataLength.into(),
+            )))
+        ),
+        case::unsigned_32_format(
+            & [
+            // Code: 266 (Vendor-Id)
+            0x00, 0x00, 0x01, 0x0a,
+            // Flags: 0x00
+            0x00,
+            // Length: 12,
+            0x00, 0x00, 0x0c,
+            // Vendor-Id:
+            // Data:
+            0x00, 0x00, 0x00, 0x7b,
+            // Padding
 
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 266,
-    code: AttributeCode::VendorId,
-    },
-    flags: 0x00,
-    length: 12,
-    vendor_id: None,
-    value: Value::Unsigned32(123),
-    padding: vec ! [],
-    },
-    ErrorFlags::NONE,
-    )))
-    ),
-    case::unsigned_64_format(
-    & [
-    // Code: 287 (Accounting-Realtime-Required)
-    0x00, 0x00, 0x01, 0x1f,
-    // Flags: 0x00
-    0x00,
-    // Length: 16,
-    0x00, 0x00, 0x10,
-    // Vendor-Id:
-    // Data:
-    0x00, 0x00, 0x00, 0x7B,
-    0x01, 0x02, 0x02, 0x03,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 287,
-    code: AttributeCode::AccountingSubSessionId,
-    },
-    flags: 0x00,
-    length: 16,
-    vendor_id: None,
-    value: Value::Unsigned64(528_297_886_211),
-    padding: Vec::new(),
-    },
-                ErrorFlags::none(),
-    )))
-    ),
-    case::enumerated_format(
-    & [
-    // Code: 483 (Accounting-Realtime-Required)
-    0x00, 0x00, 0x01, 0xe3,
-    // Flags: 0x00
-    0x00,
-    // Length: 12,
-    0x00, 0x00, 0x0c,
-    // Vendor-Id:
-    // Data: Grant-And-Store (2)
-    0x00, 0x00, 0x00, 0x02,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 483,
-    code: AttributeCode::AccountingRealtimeRequired,
-    },
-    flags: 0x00,
-    length: 12,
-    vendor_id: None,
-    value: Value::Enumerated(2),
-    padding: Vec::new(),
-    },
-                ErrorFlags::none(),
-    )))
-    ),
-    case::octet_string_format(
-    & [
-    // Code: 44 (AcctSessionId)
-    0x00, 0x00, 0x00, 0x2c,
-    // Flags: 0x00
-    0x00,
-    // Length: 15,
-    0x00, 0x00, 0x0f,
-    // Vendor-Id:
-    // Data:
-    0x01, 0x02, 0x03, 0x04,
-    0x05, 0x06, 0x07,
-    // Padding:
-    0xef,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 44,
-    code: AttributeCode::AcctSessionId,
-    },
-    flags: 0x00,
-    length: 15,
-    vendor_id: None,
-    value: Value::OctetString(vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]),
-    padding: vec ! [0xef],
-    },
-                ErrorFlags::NonZeroPadding.into(),
-    )))
-    ),
-    case::utf8_string_format(
-    & [
-    // Code: 1 (Username)
-    0x00, 0x00, 0x00, 0x01,
-    // Flags: 0x00
-    0x00,
-    // Length: 20,
-    0x00, 0x00, 0x14,
-    // Vendor-Id:
-    // Data: Hello World!
-    0x48, 0x65, 0x6c, 0x6c,
-    0x6f, 0x20, 0x57, 0x6f,
-    0x72, 0x6c, 0x64, 0x21,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 1,
-    code: AttributeCode::UserName,
-    },
-    flags: 0x00,
-    length: 20,
-    vendor_id: None,
-    value: Value::UTF8String("Hello World!".into()),
-    padding: Vec::new(),
-    },
-                ErrorFlags::none(),
-    )))
-    ),
-    case::diameter_uri_format(
-    & [
-    // Code: 292 (RedirectHost)
-    0x00, 0x00, 0x01, 0x24,
-    // Flags: 0x00
-    0x00,
-    // Length: 19,
-    0x00, 0x00, 0x13,
-    // Vendor-Id:
-    // Data: example.com
-    0x65, 0x78, 0x61, 0x6d,
-    0x70, 0x6c, 0x65, 0x2e,
-    0x63, 0x6f, 0x6d,
-    // Padding:
-    0x00,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 292,
-    code: AttributeCode::RedirectHost,
-    },
-    flags: 0x00,
-    length: 19,
-    vendor_id: None,
-    value: Value::DiameterURI("example.com".into()),
-    padding: vec ! [0x00],
-    },
-                ErrorFlags::none(),
-    )))
-    ),
-    case::address_v4_format(
-    & [
-    // Code: 257 (HostIPAddress)
-    0x00, 0x00, 0x01, 0x01,
-    // Flags: 0x0f
-    0x0f,
-    // Length: 12,
-    0x00, 0x00, 0x0c,
-    // Vendor-Id:
-    // Data: 10.10.0.1
-    0x0a, 0x0a, 0x00, 0x01,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 257,
-    code: AttributeCode::HostIPAddress,
-    },
-    flags: 0x0f,
-    length: 12,
-    vendor_id: None,
-    value: Value::Address(IpAddr::V4(Ipv4Addr::new(10, 10, 0, 1))),
-    padding: Vec::new(),
-    },
-                ErrorFlags::NonZeroReserved.into(),
-    )))
-    ),
-    case::address_v6_format(
-    & [
-    // Code: 257 (HostIPAddress)
-    0x00, 0x00, 0x01, 0x01,
-    // Flags: 0x00
-    0x00,
-    // Length: 24,
-    0x00, 0x00, 0x18,
-    // Vendor-Id:
-    // Data: 2001:0db8:85a3:0000:0000:8a2e:0370:7334
-    0x20, 0x01, 0x0d, 0xb8,
-    0x85, 0xa3, 0x00, 0x00,
-    0x00, 0x00, 0x8a, 0x2e,
-    0x03, 0x70, 0x73, 0x34,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 257,
-    code: AttributeCode::HostIPAddress,
-    },
-    flags: 0x00,
-    length: 24,
-    vendor_id: None,
-    value: Value::Address(IpAddr::V6(Ipv6Addr::new(
-    0x2001, 0x0db8, 0x85a3, 0x0000,
-    0x0000, 0x8a2e, 0x0370, 0x7334))),
-    padding: Vec::new(),
-    },
-                ErrorFlags::none(),
-    )))
-    ),
-    case::time_format(
-    & [
-    // Code: 55 (EventTimestamp)
-    0x00, 0x00, 0x00, 0x37,
-    // Flags: 0x00
-    0x00,
-    // Length: 12,
-    0x00, 0x00, 0x0c,
-    // Vendor-Id:
-    // Data: 3794601600 (March 31, 2021)
-    0xe2, 0x2d, 0x06, 0x80
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 55,
-    code: AttributeCode::EventTimestamp,
-    },
-    flags: 0x00,
-    length: 12,
-    vendor_id: None,
-    value: Value::Time(3_794_601_600),
-    padding: Vec::new(),
-    },
-                ErrorFlags::none(),
-    )))
-    ),
-    case::grouped_format_ef(
-    & [
-    // Code: 297 (ExperimentalResult)
-    0x00, 0x00, 0x01, 0x29,
-    // Flags: 0x00
-    0x00,
-    // Length: 44,
-    0x00, 0x00, 0x2c,
-    // Vendor-Id:
-    // Data:
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 266,
+            code: AttributeCode::VendorId,
+            },
+            flags: 0x00,
+            length: 12,
+            vendor_id: None,
+            value: Value::Unsigned32(123),
+            padding: vec ! [],
+            },
+            ErrorFlags::none(),
+            )))
+        ),
+        case::unsigned_64_format(
+            & [
+            // Code: 287 (Accounting-Realtime-Required)
+            0x00, 0x00, 0x01, 0x1f,
+            // Flags: 0x00
+            0x00,
+            // Length: 16,
+            0x00, 0x00, 0x10,
+            // Vendor-Id:
+            // Data:
+            0x00, 0x00, 0x00, 0x7B,
+            0x01, 0x02, 0x02, 0x03,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 287,
+            code: AttributeCode::AccountingSubSessionId,
+            },
+            flags: 0x00,
+            length: 16,
+            vendor_id: None,
+            value: Value::Unsigned64(528_297_886_211),
+            padding: Vec::new(),
+            },
+                        ErrorFlags::none(),
+            )))
+        ),
+        case::enumerated_format(
+            & [
+            // Code: 483 (Accounting-Realtime-Required)
+            0x00, 0x00, 0x01, 0xe3,
+            // Flags: 0x00
+            0x00,
+            // Length: 12,
+            0x00, 0x00, 0x0c,
+            // Vendor-Id:
+            // Data: Grant-And-Store (2)
+            0x00, 0x00, 0x00, 0x02,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 483,
+            code: AttributeCode::AccountingRealtimeRequired,
+            },
+            flags: 0x00,
+            length: 12,
+            vendor_id: None,
+            value: Value::Enumerated(2),
+            padding: Vec::new(),
+            },
+                        ErrorFlags::none(),
+            )))
+        ),
+        case::octet_string_format(
+            & [
+            // Code: 44 (AcctSessionId)
+            0x00, 0x00, 0x00, 0x2c,
+            // Flags: 0x00
+            0x00,
+            // Length: 15,
+            0x00, 0x00, 0x0f,
+            // Vendor-Id:
+            // Data:
+            0x01, 0x02, 0x03, 0x04,
+            0x05, 0x06, 0x07,
+            // Padding:
+            0xef,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 44,
+            code: AttributeCode::AcctSessionId,
+            },
+            flags: 0x00,
+            length: 15,
+            vendor_id: None,
+            value: Value::OctetString(vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]),
+            padding: vec ! [0xef],
+            },
+                        ErrorFlags::NonZeroPadding.into(),
+            )))
+        ),
+        case::utf8_string_format(
+            & [
+            // Code: 1 (Username)
+            0x00, 0x00, 0x00, 0x01,
+            // Flags: 0x00
+            0x00,
+            // Length: 20,
+            0x00, 0x00, 0x14,
+            // Vendor-Id:
+            // Data: Hello World!
+            0x48, 0x65, 0x6c, 0x6c,
+            0x6f, 0x20, 0x57, 0x6f,
+            0x72, 0x6c, 0x64, 0x21,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 1,
+            code: AttributeCode::UserName,
+            },
+            flags: 0x00,
+            length: 20,
+            vendor_id: None,
+            value: Value::UTF8String("Hello World!".into()),
+            padding: Vec::new(),
+            },
+                        ErrorFlags::none(),
+            )))
+        ),
+        case::diameter_uri_format(
+            & [
+            // Code: 292 (RedirectHost)
+            0x00, 0x00, 0x01, 0x24,
+            // Flags: 0x00
+            0x00,
+            // Length: 19,
+            0x00, 0x00, 0x13,
+            // Vendor-Id:
+            // Data: example.com
+            0x65, 0x78, 0x61, 0x6d,
+            0x70, 0x6c, 0x65, 0x2e,
+            0x63, 0x6f, 0x6d,
+            // Padding:
+            0x00,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 292,
+            code: AttributeCode::RedirectHost,
+            },
+            flags: 0x00,
+            length: 19,
+            vendor_id: None,
+            value: Value::DiameterURI("example.com".into()),
+            padding: vec ! [0x00],
+            },
+                        ErrorFlags::none(),
+            )))
+        ),
+        case::address_v4_format(
+            & [
+            // Code: 257 (HostIPAddress)
+            0x00, 0x00, 0x01, 0x01,
+            // Flags: 0x0f
+            0x0f,
+            // Length: 12,
+            0x00, 0x00, 0x0c,
+            // Vendor-Id:
+            // Data: 10.10.0.1
+            0x0a, 0x0a, 0x00, 0x01,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 257,
+            code: AttributeCode::HostIPAddress,
+            },
+            flags: 0x0f,
+            length: 12,
+            vendor_id: None,
+            value: Value::Address(IpAddr::V4(Ipv4Addr::new(10, 10, 0, 1))),
+            padding: Vec::new(),
+            },
+                        ErrorFlags::NonZeroReserved.into(),
+            )))
+        ),
+        case::address_v6_format(
+            & [
+            // Code: 257 (HostIPAddress)
+            0x00, 0x00, 0x01, 0x01,
+            // Flags: 0x00
+            0x00,
+            // Length: 24,
+            0x00, 0x00, 0x18,
+            // Vendor-Id:
+            // Data: 2001:0db8:85a3:0000:0000:8a2e:0370:7334
+            0x20, 0x01, 0x0d, 0xb8,
+            0x85, 0xa3, 0x00, 0x00,
+            0x00, 0x00, 0x8a, 0x2e,
+            0x03, 0x70, 0x73, 0x34,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 257,
+            code: AttributeCode::HostIPAddress,
+            },
+            flags: 0x00,
+            length: 24,
+            vendor_id: None,
+            value: Value::Address(IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x0db8, 0x85a3, 0x0000,
+            0x0000, 0x8a2e, 0x0370, 0x7334))),
+            padding: Vec::new(),
+            },
+                        ErrorFlags::none(),
+            )))
+        ),
+        case::time_format(
+            & [
+            // Code: 55 (EventTimestamp)
+            0x00, 0x00, 0x00, 0x37,
+            // Flags: 0x00
+            0x00,
+            // Length: 12,
+            0x00, 0x00, 0x0c,
+            // Vendor-Id:
+            // Data: 3794601600 (March 31, 2021)
+            0xe2, 0x2d, 0x06, 0x80
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 55,
+            code: AttributeCode::EventTimestamp,
+            },
+            flags: 0x00,
+            length: 12,
+            vendor_id: None,
+            value: Value::Time(3_794_601_600),
+            padding: Vec::new(),
+            },
+                        ErrorFlags::none(),
+            )))
+        ),
+        case::grouped_format_ef(
+            & [
+            // Code: 297 (ExperimentalResult)
+            0x00, 0x00, 0x01, 0x29,
+            // Flags: 0x00
+            0x00,
+            // Length: 44,
+            0x00, 0x00, 0x2c,
+            // Vendor-Id:
+            // Data:
 
-    // AVPs[0]
-    // Code: 264 (OriginHost)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 0x00
-    0x00,
-    // Length: 19,
-    0x00, 0x00, 0x13,
-    // Vendor-Id:
-    // Data: example.com
-    0x65, 0x78, 0x61, 0x6d,
-    0x70, 0x6c, 0x65, 0x2e,
-    0x63, 0x6f, 0x6d,
-    // Padding:
-    0x01,
+            // AVPs[0]
+            // Code: 264 (OriginHost)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 0x00
+            0x00,
+            // Length: 19,
+            0x00, 0x00, 0x13,
+            // Vendor-Id:
+            // Data: example.com
+            0x65, 0x78, 0x61, 0x6d,
+            0x70, 0x6c, 0x65, 0x2e,
+            0x63, 0x6f, 0x6d,
+            // Padding:
+            0x01,
 
-    // AVPs[1]
-    // Code: 44 ( AcctSessionId)
-    0x00, 0x00, 0x00, 0x2c,
-    // Flags: 0x0f,
-    0x0f,
-    // Length: 15,
-    0x00, 0x00, 0x0f,
-    // Vendor-Id:
-    // Data:
-    0x01, 0x02, 0x03, 0x04,
-    0x05, 0x06, 0x07,
-    // Padding:
-    0x00,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 297,
-    code: AttributeCode::ExperimentalResult,
-    },
-    flags: 0x00,
-    length: 44,
-    vendor_id: None,
-    value: Value::Grouped(vec ! [
-    AVP {
-    attribute: Attribute {
-    raw: 264,
-    code: AttributeCode::OriginHost,
-    },
-    flags: 0x00,
-    length: 19,
-    vendor_id: None,
-    value: Value::DiameterIdentity("example.com".into()),
-    padding: vec ! [0x01],
-    },
-    AVP {
-    attribute: Attribute {
-    raw: 44,
-    code: AttributeCode::AcctSessionId,
-    },
-    flags: 0x0f,
-    length: 15,
-    vendor_id: None,
-    value: Value::OctetString(vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]),
-    padding: vec ! [0x00],
-    }]),
-    padding: Vec::new(),
-    },
-                ErrorFlags::NonZeroPadding | ErrorFlags::NonZeroReserved
-    )))
-    ),
-    case::grouped_format(
-    & [
-    // Code: 297 (ExperimentalResult)
-    0x00, 0x00, 0x01, 0x29,
-    // Flags: 0x00
-    0x00,
-    // Length: 44,
-    0x00, 0x00, 0x2c,
-    // Vendor-Id:
-    // Data:
+            // AVPs[1]
+            // Code: 44 ( AcctSessionId)
+            0x00, 0x00, 0x00, 0x2c,
+            // Flags: 0x0f,
+            0x0f,
+            // Length: 15,
+            0x00, 0x00, 0x0f,
+            // Vendor-Id:
+            // Data:
+            0x01, 0x02, 0x03, 0x04,
+            0x05, 0x06, 0x07,
+            // Padding:
+            0x00,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 297,
+            code: AttributeCode::ExperimentalResult,
+            },
+            flags: 0x00,
+            length: 44,
+            vendor_id: None,
+            value: Value::Grouped(vec ! [
+            AVP {
+            attribute: Attribute {
+            raw: 264,
+            code: AttributeCode::OriginHost,
+            },
+            flags: 0x00,
+            length: 19,
+            vendor_id: None,
+            value: Value::DiameterIdentity("example.com".into()),
+            padding: vec ! [0x01],
+            },
+            AVP {
+            attribute: Attribute {
+            raw: 44,
+            code: AttributeCode::AcctSessionId,
+            },
+            flags: 0x0f,
+            length: 15,
+            vendor_id: None,
+            value: Value::OctetString(vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]),
+            padding: vec ! [0x00],
+            }]),
+            padding: Vec::new(),
+            },
+                        ErrorFlags::NonZeroPadding | ErrorFlags::NonZeroReserved
+            )))
+        ),
+        case::grouped_format(
+            & [
+            // Code: 297 (ExperimentalResult)
+            0x00, 0x00, 0x01, 0x29,
+            // Flags: 0x00
+            0x00,
+            // Length: 44,
+            0x00, 0x00, 0x2c,
+            // Vendor-Id:
+            // Data:
 
-    // AVPs[0]
-    // Code: 264 (OriginHost)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 0x00
-    0x00,
-    // Length: 19,
-    0x00, 0x00, 0x13,
-    // Vendor-Id:
-    // Data: example.com
-    0x65, 0x78, 0x61, 0x6d,
-    0x70, 0x6c, 0x65, 0x2e,
-    0x63, 0x6f, 0x6d,
-    // Padding:
-    0x00,
+            // AVPs[0]
+            // Code: 264 (OriginHost)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 0x00
+            0x00,
+            // Length: 19,
+            0x00, 0x00, 0x13,
+            // Vendor-Id:
+            // Data: example.com
+            0x65, 0x78, 0x61, 0x6d,
+            0x70, 0x6c, 0x65, 0x2e,
+            0x63, 0x6f, 0x6d,
+            // Padding:
+            0x00,
 
-    // AVPs[1]
-    // Code: 44 ( AcctSessionId)
-    0x00, 0x00, 0x00, 0x2c,
-    // Flags: 0x00,
-    0x00,
-    // Length: 15,
-    0x00, 0x00, 0x0f,
-    // Vendor-Id:
-    // Data:
-    0x01, 0x02, 0x03, 0x04,
-    0x05, 0x06, 0x07,
-    // Padding:
-    0x00,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 297,
-    code: AttributeCode::ExperimentalResult,
-    },
-    flags: 0x00,
-    length: 44,
-    vendor_id: None,
-    value: Value::Grouped(vec ! [
-    AVP {
-    attribute: Attribute {
-    raw: 264,
-    code: AttributeCode::OriginHost,
-    },
-    flags: 0x00,
-    length: 19,
-    vendor_id: None,
-    value: Value::DiameterIdentity("example.com".into()),
-    padding: vec ! [0x00],
-    },
-    AVP {
-    attribute: Attribute {
-    raw: 44,
-    code: AttributeCode::AcctSessionId,
-    },
-    flags: 0x00,
-    length: 15,
-    vendor_id: None,
-    value: Value::OctetString(vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]),
-    padding: vec ! [0x00],
-    }]),
-    padding: Vec::new(),
-    },
-    ErrorFlags::NONE
-    )))
-    ),
-    case::invalid_utf8(
-    & [
-    // Code: 1 (Username)
-    0x00, 0x00, 0x00, 0x01,
-    // Flags: 0x00
-    0x00,
-    // Length: 12,
-    0x00, 0x00, 0x0c,
-    // Vendor-Id:
-    // Data:
-    0xfe, 0xfe, 0xff, 0xff,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 1,
-    code: AttributeCode::UserName,
-    },
-    flags: 0x00,
-    length: 12,
-    vendor_id: None,
-    value: Value::Unhandled(vec ! [0xfe, 0xfe, 0xff, 0xff]),
-    padding: Vec::new(),
-    },
-                ErrorFlags::DataValue.into(),
-    )))
-    ),
-    case::invalid_address(
-    & [
-    // Code: 257 (HostIPAddress)
-    0x00, 0x00, 0x01, 0x01,
-    // Flags: 0x00
-    0x00,
-    // Length: 13,
-    0x00, 0x00, 0x0d,
-    // Vendor-Id:
-    // Data: 10.10.0.1.1 (Invalid)
-    0x0a, 0x0a, 0x00, 0x01, 0x01,
-    // Padding
-    0x00, 0x00, 0x00,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 257,
-    code: AttributeCode::HostIPAddress,
-    },
-    flags: 0x00,
-    length: 13,
-    vendor_id: None,
-    value: Value::Unhandled(vec ! [0x0a, 0x0a, 0x00, 0x01, 0x01]),
-    padding: vec ! [0x00, 0x00, 0x00],
-    },
-                ErrorFlags::DataLength.into(),
-    )))
-    ),
-    case::unhandled(
-    & [
-    // Code: 2
-    0x00, 0x00, 0x00, 0x02,
-    // Flags: 0x00
-    0x00,
-    // Length: 13,
-    0x00, 0x00, 0x0d,
-    // Vendor-Id:
-    // Data: 10.10.0.1.1 (Invalid)
-    0x0a, 0x0a, 0x00, 0x01, 0x01,
-    // Padding
-    0x00, 0x00, 0x00,
-    ],
-    Ok((& [] as & [u8],
-    (
-    AVP {
-    attribute: Attribute {
-    raw: 2,
-    code: AttributeCode::Unknown,
-    },
-    flags: 0x00,
-    length: 13,
-    vendor_id: None,
-    value: Value::Unhandled(vec ! [0x0a, 0x0a, 0x00, 0x01, 0x01]),
-    padding: vec ! [0x00, 0x00, 0x00],
-    },
-                ErrorFlags::none(),
-    )))
-    )
+            // AVPs[1]
+            // Code: 44 ( AcctSessionId)
+            0x00, 0x00, 0x00, 0x2c,
+            // Flags: 0x00,
+            0x00,
+            // Length: 15,
+            0x00, 0x00, 0x0f,
+            // Vendor-Id:
+            // Data:
+            0x01, 0x02, 0x03, 0x04,
+            0x05, 0x06, 0x07,
+            // Padding:
+            0x00,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 297,
+            code: AttributeCode::ExperimentalResult,
+            },
+            flags: 0x00,
+            length: 44,
+            vendor_id: None,
+            value: Value::Grouped(vec ! [
+            AVP {
+            attribute: Attribute {
+            raw: 264,
+            code: AttributeCode::OriginHost,
+            },
+            flags: 0x00,
+            length: 19,
+            vendor_id: None,
+            value: Value::DiameterIdentity("example.com".into()),
+            padding: vec ! [0x00],
+            },
+            AVP {
+            attribute: Attribute {
+            raw: 44,
+            code: AttributeCode::AcctSessionId,
+            },
+            flags: 0x00,
+            length: 15,
+            vendor_id: None,
+            value: Value::OctetString(vec ! [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]),
+            padding: vec ! [0x00],
+            }]),
+            padding: Vec::new(),
+            },
+            ErrorFlags::none()
+            )))
+        ),
+        case::invalid_utf8(
+            & [
+            // Code: 1 (Username)
+            0x00, 0x00, 0x00, 0x01,
+            // Flags: 0x00
+            0x00,
+            // Length: 12,
+            0x00, 0x00, 0x0c,
+            // Vendor-Id:
+            // Data:
+            0xfe, 0xfe, 0xff, 0xff,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 1,
+            code: AttributeCode::UserName,
+            },
+            flags: 0x00,
+            length: 12,
+            vendor_id: None,
+            value: Value::Unhandled(vec ! [0xfe, 0xfe, 0xff, 0xff]),
+            padding: Vec::new(),
+            },
+                        ErrorFlags::DataValue.into(),
+            )))
+        ),
+        case::invalid_address(
+            & [
+            // Code: 257 (HostIPAddress)
+            0x00, 0x00, 0x01, 0x01,
+            // Flags: 0x00
+            0x00,
+            // Length: 13,
+            0x00, 0x00, 0x0d,
+            // Vendor-Id:
+            // Data: 10.10.0.1.1 (Invalid)
+            0x0a, 0x0a, 0x00, 0x01, 0x01,
+            // Padding
+            0x00, 0x00, 0x00,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 257,
+            code: AttributeCode::HostIPAddress,
+            },
+            flags: 0x00,
+            length: 13,
+            vendor_id: None,
+            value: Value::Unhandled(vec ! [0x0a, 0x0a, 0x00, 0x01, 0x01]),
+            padding: vec ! [0x00, 0x00, 0x00],
+            },
+                        ErrorFlags::DataLength.into(),
+            )))
+        ),
+        case::unhandled(
+            & [
+            // Code: 2
+            0x00, 0x00, 0x00, 0x02,
+            // Flags: 0x00
+            0x00,
+            // Length: 13,
+            0x00, 0x00, 0x0d,
+            // Vendor-Id:
+            // Data: 10.10.0.1.1 (Invalid)
+            0x0a, 0x0a, 0x00, 0x01, 0x01,
+            // Padding
+            0x00, 0x00, 0x00,
+            ],
+            Ok((& [] as & [u8],
+            (
+            AVP {
+            attribute: Attribute {
+            raw: 2,
+            code: AttributeCode::Unknown,
+            },
+            flags: 0x00,
+            length: 13,
+            vendor_id: None,
+            value: Value::Unhandled(vec ! [0x0a, 0x0a, 0x00, 0x01, 0x01]),
+            padding: vec ! [0x00, 0x00, 0x00],
+            },
+                        ErrorFlags::none(),
+            )))
+        )
     )]
-    fn test_avp(input: &[u8], expected: IResult<&[u8], (AVP, ErrorFlags)>) {
-        let res = AVP::parse(input);
-        assert_eq!(res, expected);
-        match res {
-            Ok((_left, (avp, err_flag))) => {
-                if err_flag == ErrorFlags::NONE {
-                    let mut buf: Vec<u8> = Vec::new();
-                    let _res = avp.write_to(&mut buf, BigEndian);
-                    assert_eq!(buf.as_slice(), input);
-                    let len = AVP::len(avp.vendor_id, &avp.value);
-                    #[cfg(debug)]
-                    if len != avp.length {
-                        println!("Actual : {}, expected: {}", len, avp.length);
-                        let len = AVP::len(avp.vendor_id, &avp.value);
-                    } else {
-                        println!("Matched OK");
-                    }
-                    assert_eq!(len, avp.length as usize);
-                }
-            }
-
-            Err(_) => {}
-        }
-    }
-
-    fn test_avp2(input: &[u8], expected: IResult<&[u8], (AVP, Flags<ErrorFlags>)>) {
+    fn test_avp(input: &[u8], expected: IResult<&[u8], (AVP, Flags<ErrorFlags>)>) {
         assert_eq!(AVP::parse(input), expected);
     }
 
+
     #[rstest(
-    input,
-    expected,
-    case::empty(b"", Err(Error::incomplete_needed(1))),
-    case::header(
-    & [
-    // Version: 1
-    0x01,
-    // Length: 20
-    0x00, 0x00, 0x14,
-    // Flags: 128 (Request)
-    0x80,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
-    ],
-    Ok((& [] as & [u8],
-    Some(Message {
-    header: Header {
-    version: 1,
-    length: 20,
-    flags: 128,
-    code: Command::new(257),
-    app_id: 0,
-    hop_id: 0x53ca_fe6a,
-    end_id: 0x7dc0_a11b,
-    },
-    avps: Vec::new(),
-                    error_flags: ErrorFlags::none(),
-    })
-    ))
-    ),
-    case::full_message(
-    & [
-    // Header
-    // Version: 1
-    0x01,
-    // Length: 64
-    0x00, 0x00, 0x40,
-    // Flags: 128 (Request)
-    0x8f,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
+        input,
+        expected,
+        case::empty(b"", Err(Error::incomplete_needed(1))),
+        case::header(
+            & [
+            // Version: 1
+            0x01,
+            // Length: 20
+            0x00, 0x00, 0x14,
+            // Flags: 128 (Request)
+            0x80,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
+            ],
+            Ok((& [] as & [u8],
+            Some(Message {
+            header: Header {
+            version: 1,
+            length: 20,
+            flags: 128,
+            code: Command::new(257),
+            app_id: 0,
+            hop_id: 0x53ca_fe6a,
+            end_id: 0x7dc0_a11b,
+            },
+            avps: Vec::new(),
+                            error_flags: ErrorFlags::none(),
+            })
+            ))
+        ),
+        case::full_message(
+            & [
+            // Header
+            // Version: 1
+            0x01,
+            // Length: 64
+            0x00, 0x00, 0x40,
+            // Flags: 128 (Request)
+            0x8f,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
 
-    //AVPs[0]
-    // Code: 264 (Origin-Host)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 40 (Mandatory)
-    0x40,
-    // Length: 31
-    0x00, 0x00, 0x1f,
-    // Data: "backend.eap.testbed.aaa"
-    0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2e,
-    0x65, 0x61, 0x70, 0x2e, 0x74, 0x65, 0x73, 0x74,
-    0x62, 0x65, 0x64, 0x2e, 0x61, 0x61, 0x61,
-    // Padding: 1
-    0x01,
+            //AVPs[0]
+            // Code: 264 (Origin-Host)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 40 (Mandatory)
+            0x40,
+            // Length: 31
+            0x00, 0x00, 0x1f,
+            // Data: "backend.eap.testbed.aaa"
+            0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2e,
+            0x65, 0x61, 0x70, 0x2e, 0x74, 0x65, 0x73, 0x74,
+            0x62, 0x65, 0x64, 0x2e, 0x61, 0x61, 0x61,
+            // Padding: 1
+            0x01,
 
-    // AVPS[1]
-    // Code: 264 (Origin-Host)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 0x80 (Vendor-Id)
-    0x80,
-    // Length: 12
-    0x00, 0x00, 0x0c,
-    // Vendor-Id: 1234567890
-    0x49, 0x96, 0x02, 0xd2,
-    // Data:
-    // Padding:
-    ],
-    Ok((& [] as & [u8],
-    Some(Message {
-    header: Header {
-    version: 1,
-    length: 64,
-    flags: 143,
-    code: Command::new(257),
-    app_id: 0,
-    hop_id: 0x53ca_fe6a,
-    end_id: 0x7dc0_a11b,
-    },
-    avps: vec ! [
-    AVP {
-    attribute: Attribute {
-    raw: 264,
-    code: AttributeCode::OriginHost,
-    },
-    flags: 0x40,
-    length: 31,
-    vendor_id: None,
-    value: Value::DiameterIdentity("backend.eap.testbed.aaa".into()),
-    padding: vec ! [0x01],
-    },
-    AVP {
-    attribute: Attribute {
-    raw: 264,
-    code: AttributeCode::OriginHost,
-    },
-    flags: 0x80,
-    length: 12,
-    vendor_id: Some(1_234_567_890u32),
-    value: Value::DiameterIdentity("".into()),
-    padding: Vec::new(),
-    },
-    ],
-                error_flags : ErrorFlags::NonZeroReserved | ErrorFlags::NonZeroPadding,
-    })
-    ))),
-    case::incomplete(
-    & [
-    // Header
-    // Version: 1
-    0x01,
-    // Length: 66
-    0x00, 0x00, 0x42,
-    // Flags: 128 (Request)
-    0x80,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
+            // AVPS[1]
+            // Code: 264 (Origin-Host)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 0x80 (Vendor-Id)
+            0x80,
+            // Length: 12
+            0x00, 0x00, 0x0c,
+            // Vendor-Id: 1234567890
+            0x49, 0x96, 0x02, 0xd2,
+            // Data:
+            // Padding:
+            ],
+            Ok((& [] as & [u8],
+            Some(Message {
+            header: Header {
+            version: 1,
+            length: 64,
+            flags: 143,
+            code: Command::new(257),
+            app_id: 0,
+            hop_id: 0x53ca_fe6a,
+            end_id: 0x7dc0_a11b,
+            },
+            avps: vec ! [
+            AVP {
+            attribute: Attribute {
+            raw: 264,
+            code: AttributeCode::OriginHost,
+            },
+            flags: 0x40,
+            length: 31,
+            vendor_id: None,
+            value: Value::DiameterIdentity("backend.eap.testbed.aaa".into()),
+            padding: vec ! [0x01],
+            },
+            AVP {
+            attribute: Attribute {
+            raw: 264,
+            code: AttributeCode::OriginHost,
+            },
+            flags: 0x80,
+            length: 12,
+            vendor_id: Some(1_234_567_890u32),
+            value: Value::DiameterIdentity("".into()),
+            padding: Vec::new(),
+            },
+            ],
+                        error_flags : ErrorFlags::NonZeroReserved | ErrorFlags::NonZeroPadding,
+            })
+            ))),
+        case::incomplete(
+            & [
+            // Header
+            // Version: 1
+            0x01,
+            // Length: 66
+            0x00, 0x00, 0x42,
+            // Flags: 128 (Request)
+            0x80,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
 
-    //AVPs[0]
-    // Code: 264 (Origin-Host)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 40 (Mandatory)
-    0x40,
-    // Length: 31
-    0x00, 0x00, 0x1f,
-    // Data: "backend.eap.testbed.aaa"
-    0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2e,
-    0x65, 0x61, 0x70, 0x2e, 0x74, 0x65, 0x73, 0x74,
-    0x62, 0x65, 0x64, 0x2e, 0x61, 0x61, 0x61,
-    // Padding: 1
-    0x00,
+            //AVPs[0]
+            // Code: 264 (Origin-Host)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 40 (Mandatory)
+            0x40,
+            // Length: 31
+            0x00, 0x00, 0x1f,
+            // Data: "backend.eap.testbed.aaa"
+            0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2e,
+            0x65, 0x61, 0x70, 0x2e, 0x74, 0x65, 0x73, 0x74,
+            0x62, 0x65, 0x64, 0x2e, 0x61, 0x61, 0x61,
+            // Padding: 1
+            0x00,
 
-    // AVPS[1]
-    // Code: 264 (Origin-Host)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 0x80 (Vendor-Id)
-    0x80,
-    // Length: 14
-    0x00, 0x00, 0x0e,
-    // Vendor-Id: 1234567890
-    0x49, 0x96, 0x02, 0xd2,
-    // Data:
-    // Padding:
-    ],
-    Err(Error::incomplete_needed(2))
-    ),
-    case::invalid_avp(
-    & [
-    // Header
-    // Version: 1
-    0x01,
-    // Length: 64
-    0x00, 0x00, 0x40,
-    // Flags: 128 (Request)
-    0x80,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
+            // AVPS[1]
+            // Code: 264 (Origin-Host)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 0x80 (Vendor-Id)
+            0x80,
+            // Length: 14
+            0x00, 0x00, 0x0e,
+            // Vendor-Id: 1234567890
+            0x49, 0x96, 0x02, 0xd2,
+            // Data:
+            // Padding:
+            ],
+            Err(Error::incomplete_needed(2))
+        ),
+        case::invalid_avp(
+            & [
+            // Header
+            // Version: 1
+            0x01,
+            // Length: 64
+            0x00, 0x00, 0x40,
+            // Flags: 128 (Request)
+            0x80,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
 
-    //AVPs[0]
-    // Code: 264 (Origin-Host)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 40 (Mandatory)
-    0x40,
-    // Length: 31
-    0x00, 0x00, 0x1f,
-    // Data: "backend.eap.testbed.aaa"
-    0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2e,
-    0x65, 0x61, 0x70, 0x2e, 0x74, 0x65, 0x73, 0x74,
-    0x62, 0x65, 0x64, 0x2e, 0x61, 0x61, 0x61,
-    // Padding: 1
-    0x00,
+            //AVPs[0]
+            // Code: 264 (Origin-Host)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 40 (Mandatory)
+            0x40,
+            // Length: 31
+            0x00, 0x00, 0x1f,
+            // Data: "backend.eap.testbed.aaa"
+            0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2e,
+            0x65, 0x61, 0x70, 0x2e, 0x74, 0x65, 0x73, 0x74,
+            0x62, 0x65, 0x64, 0x2e, 0x61, 0x61, 0x61,
+            // Padding: 1
+            0x00,
 
-    // AVPS[1]
-    // Code: 264 (Origin-Host)
-    0x00, 0x00, 0x01, 0x08,
-    // Flags: 0x80 (Vendor-Id)
-    0x80,
-    // Length: 14
-    0x00, 0x00, 0x0e,
-    // Vendor-Id: 1234567890
-    0x49, 0x96, 0x02, 0xd2,
-    // Data:
-    // Padding:
-    ],
-    Err(Error::parse(Some("Many0".to_string()))),
-    ),
+            // AVPS[1]
+            // Code: 264 (Origin-Host)
+            0x00, 0x00, 0x01, 0x08,
+            // Flags: 0x80 (Vendor-Id)
+            0x80,
+            // Length: 14
+            0x00, 0x00, 0x0e,
+            // Vendor-Id: 1234567890
+            0x49, 0x96, 0x02, 0xd2,
+            // Data:
+            // Padding:
+            ],
+            Err(Error::parse(Some("Many0".to_string()))),
+        ),
     )]
     fn test_parse(input: &[u8], expected: Result<(&[u8], Option<Message>)>) {
         let diameter = Diameter {};
@@ -3357,36 +3329,39 @@ mod tests {
         }
     }
 
+
+
     #[rstest(
-    input,
-    expected,
-    case::empty(b"", Status::Incomplete),
-    case::hello_world(b"hello world", Status::Unrecognized),
-    case::header(
-    & [
-    // Version: 1
-    0x01,
-    // Length: 20
-    0x00, 0x00, 0x14,
-    // Flags: 128 (Request)
-    0x80,
-    // Code: 257 (Capability-Exchange)
-    0x00, 0x01, 0x01,
-    // Application ID: 0 (Diameter Common Messages)
-    0x00, 0x00, 0x00, 0x00,
-    // Hop-by-Hop ID: 0x53cafe6a
-    0x53, 0xca, 0xfe, 0x6a,
-    // End-to-End ID: 0x7dc0a11b
-    0x7d, 0xc0, 0xa1, 0x1b,
-    ],
-    Status::Recognized
-    ),
+        input,
+        expected,
+        case::empty(b"", Status::Incomplete),
+        case::hello_world(b"hello world", Status::Unrecognized),
+        case::header(
+            & [
+            // Version: 1
+            0x01,
+            // Length: 20
+            0x00, 0x00, 0x14,
+            // Flags: 128 (Request)
+            0x80,
+            // Code: 257 (Capability-Exchange)
+            0x00, 0x01, 0x01,
+            // Application ID: 0 (Diameter Common Messages)
+            0x00, 0x00, 0x00, 0x00,
+            // Hop-by-Hop ID: 0x53cafe6a
+            0x53, 0xca, 0xfe, 0x6a,
+            // End-to-End ID: 0x7dc0a11b
+            0x7d, 0xc0, 0xa1, 0x1b,
+            ],
+            Status::Recognized
+        ),
     )]
     fn test_probe(input: &[u8], expected: Status) {
         let diameter = Diameter {};
 
         assert_eq!(diameter.probe(input, Direction::Unknown), expected);
     }
+
 
     #[test]
     fn test_copy_avps() {
@@ -3490,7 +3465,7 @@ mod tests {
 
         let att = EapAkaAttribute::parse(iv_input);
         match att {
-            Ok((_,(att, _))) => {
+            Ok((_, (att, _))) => {
                 assert_eq!(AtIv, att.attribute_type.code);
             }
             Err(_) => {
@@ -3499,7 +3474,7 @@ mod tests {
         }
         let att = EapAkaAttribute::parse(ri_input);
         match att {
-            Ok((_,(att, _))) => {
+            Ok((_, (att, _))) => {
                 assert_eq!(AtResultInd, att.attribute_type.code);
             }
             Err(_) => {
@@ -3508,13 +3483,13 @@ mod tests {
         }
         let att = EapAkaAttribute::parse(ed_input);
         match att {
-            Ok((_,(att, _))) => {
+            Ok((_, (att, _))) => {
                 assert_eq!(AtEncData, att.attribute_type.code);
             }
             Err(_) => {
                 panic!("Should not be here")
             }
         }
-
     }
 }
+
